@@ -1453,7 +1453,7 @@ impl EscrowContract {
         }
 
         Self::record_snapshot(&env, &m, SnapshotReason::Created);
-        Self::record_platform_match_created(&env, m.stake_amount);
+        Self::record_platform_match_created(&env, m.stake_amount, &m.platform);
 
         if let Some(bracket_id) = m.bracket_id {
             env.events().publish(
@@ -1955,7 +1955,7 @@ impl EscrowContract {
 
         Self::record_completed_match(env, &m.player1);
         Self::record_completed_match(env, &m.player2);
-        Self::record_platform_payout(env);
+        Self::record_platform_payout(env, &m.platform);
         // #1519 fix: pass is_player1 flag so win/loss is recorded from the
         // correct player's perspective, not always from Player1's perspective.
         Self::update_player_stats(env, &m.player1, &winner, m.stake_amount, true);
@@ -3227,17 +3227,19 @@ impl EscrowContract {
 
     // ── Platform Statistics (for analytics without full indexing) ─────────────
 
-    /// Retrieve platform-wide aggregated statistics.
+    /// Retrieve aggregated statistics for a specific game platform.
     ///
-    /// Returns cumulative counters for matches created, total volume staked,
-    /// and total successful payouts. These statistics are maintained on-chain
-    /// to enable off-chain analytics without requiring full event indexing.
+    /// Returns `None` when no matches have been created on that platform.
+    pub fn get_platform_stats(env: Env, platform: Platform) -> Option<PlatformStats> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PlatformStats(platform))
+    }
+
+    /// Retrieve aggregate statistics across all game platforms.
     ///
-    /// Returns a `PlatformStats` struct with fields:
-    /// - `total_matches`: Total number of matches created across all time.
-    /// - `total_volume`: Cumulative stake amount (in base token units) across all matches.
-    /// - `total_payouts`: Total number of successful payouts (matches completed with winner determination).
-    pub fn get_platform_stats(env: Env) -> PlatformStats {
+    /// Preserves access to the legacy aggregate counters for existing clients.
+    pub fn get_global_platform_stats(env: Env) -> PlatformStats {
         env.storage()
             .persistent()
             .get(&DataKey::Stats)
@@ -3249,7 +3251,7 @@ impl EscrowContract {
     }
 
     /// Internal helper to increment platform statistics. Called from `create_match`.
-    fn record_platform_match_created(env: &Env, stake_amount: i128) {
+    fn record_platform_match_created(env: &Env, stake_amount: i128, platform: &Platform) {
         let mut stats: PlatformStats =
             env.storage()
                 .persistent()
@@ -3269,10 +3271,29 @@ impl EscrowContract {
             MATCH_TTL_LEDGERS,
             MATCH_TTL_LEDGERS,
         );
+
+        let key = DataKey::PlatformStats(platform.clone());
+        let mut platform_stats: PlatformStats = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(PlatformStats {
+                total_matches: 0,
+                total_volume: 0,
+                total_payouts: 0,
+            });
+        platform_stats.total_matches = platform_stats.total_matches.saturating_add(1);
+        platform_stats.total_volume = platform_stats.total_volume.saturating_add(stake_amount);
+        env.storage().persistent().set(&key, &platform_stats);
+        env.storage().persistent().extend_ttl(
+            &key,
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
     }
 
-    /// Internal helper to record a payout in platform statistics. Called from `submit_result`.
-    fn record_platform_payout(env: &Env) {
+    /// Internal helper to record a payout in platform statistics.
+    fn record_platform_payout(env: &Env, platform: &Platform) {
         let mut stats: PlatformStats =
             env.storage()
                 .persistent()
@@ -3288,6 +3309,24 @@ impl EscrowContract {
         env.storage().persistent().set(&DataKey::Stats, &stats);
         env.storage().persistent().extend_ttl(
             &DataKey::Stats,
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
+
+        let key = DataKey::PlatformStats(platform.clone());
+        let mut platform_stats: PlatformStats = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(PlatformStats {
+                total_matches: 0,
+                total_volume: 0,
+                total_payouts: 0,
+            });
+        platform_stats.total_payouts = platform_stats.total_payouts.saturating_add(1);
+        env.storage().persistent().set(&key, &platform_stats);
+        env.storage().persistent().extend_ttl(
+            &key,
             MATCH_TTL_LEDGERS,
             MATCH_TTL_LEDGERS,
         );
@@ -3917,7 +3956,7 @@ impl EscrowContract {
 
         Self::record_completed_match(&env, &m.player1);
         Self::record_completed_match(&env, &m.player2);
-        Self::record_platform_payout(&env);
+        Self::record_platform_payout(&env, &m.platform);
         env.storage()
             .persistent()
             .set(&DataKey::Match(match_id), &m);
@@ -4346,7 +4385,7 @@ impl EscrowContract {
 
         Self::record_completed_match(&env, &m.player1);
         Self::record_completed_match(&env, &m.player2);
-        Self::record_platform_payout(&env);
+        Self::record_platform_payout(&env, &m.platform);
 
         env.storage()
             .persistent()
