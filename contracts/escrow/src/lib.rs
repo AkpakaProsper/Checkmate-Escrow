@@ -179,6 +179,9 @@ const MAX_ACTIVE_MATCHES_PER_PLAYER: u32 = 1_000;
 /// per-call cost. Callers requiring more results should use the _paginated variants.
 const MAX_UNBOUNDED_MATCH_RESULTS: u32 = 10_000;
 
+/// Maximum matches processed in a single admin bulk-expiration call.
+const MAX_BULK_EXPIRE_SIZE: usize = 100;
+
 // ── Upgrade / migration constants ─────────────────────────────────────────────
 
 /// Current contract version: major=0, minor=1, patch=0  →  1_000 * 0 + 1 * 1000 + 0.
@@ -2054,6 +2057,23 @@ impl EscrowContract {
         }
     }
 
+    /// Mark a match as deadlocked and emit the event consumed by admin recovery.
+    fn mark_oracle_deadlock(env: &Env, match_id: u64, current_confirmations: u32, required: u32) {
+        env.storage()
+            .persistent()
+            .set(&types::OracleConsensusKey::OracleDeadlock(match_id), &true);
+        env.storage().persistent().extend_ttl(
+            &types::OracleConsensusKey::OracleDeadlock(match_id),
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
+
+        env.events().publish(
+            (Symbol::new(env, "match"), symbol_short!("ora_dead")),
+            (match_id, current_confirmations, required),
+        );
+    }
+
     /// Check if a match has become deadlocked (threshold unreachable given the approved oracle set).
     /// If deadlock is detected, flag the match and emit an event.
     /// Otherwise returns Ok(()) with no side effects.
@@ -2069,7 +2089,12 @@ impl EscrowContract {
             .get(&DataKey::ApprovedOracles)
             .unwrap_or_else(|| soroban_sdk::vec![&env]);
 
-        let oracle_count = oracles.len();
+        let oracle_count = oracles.len() as u32;
+
+        if required > oracle_count {
+            Self::mark_oracle_deadlock(env, match_id, current_confirmations, required);
+            return Ok(());
+        }
 
         // Calculate how many more confirmations could theoretically be obtained.
         // We assume all remaining oracles might vote once each.
@@ -2078,19 +2103,7 @@ impl EscrowContract {
 
         // If even if all remaining oracles vote, we still can't reach the threshold, deadlock.
         if max_possible_confirmations < required {
-            env.storage()
-                .persistent()
-                .set(&types::OracleConsensusKey::OracleDeadlock(match_id), &true);
-            env.storage().persistent().extend_ttl(
-                &types::OracleConsensusKey::OracleDeadlock(match_id),
-                MATCH_TTL_LEDGERS,
-                MATCH_TTL_LEDGERS,
-            );
-
-            env.events().publish(
-                (Symbol::new(env, "match"), symbol_short!("ora_dead")),
-                (match_id, current_confirmations, required),
-            );
+            Self::mark_oracle_deadlock(env, match_id, current_confirmations, required);
         }
 
         Ok(())
@@ -2663,16 +2676,25 @@ impl EscrowContract {
     /// successfully expired. Non-pending / not-expired / not-found matches are
     /// silently skipped, so one stale entry can never block cleanup of the rest.
     pub fn bulk_expire_matches(env: Env, match_ids: Vec<u64>) -> Vec<u64> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::Unauthorized)
-            .expect("escrow contract must be initialized");
+        let Some(admin) = env.storage().instance().get::<_, Address>(&DataKey::Admin) else {
+            return Vec::new(&env);
+        };
         admin.require_auth();
 
+        let bounded_ids = if match_ids.len() > MAX_BULK_EXPIRE_SIZE {
+            let mut trimmed = Vec::new(&env);
+            for i in 0..MAX_BULK_EXPIRE_SIZE {
+                if let Some(match_id) = match_ids.get(i) {
+                    trimmed.push_back(match_id);
+                }
+            }
+            trimmed
+        } else {
+            match_ids
+        };
+
         let mut results: Vec<u64> = Vec::new(&env);
-        for match_id in match_ids.iter() {
+        for match_id in bounded_ids.iter() {
             if Self::expire_match(env.clone(), match_id).is_ok() {
                 results.push_back(match_id);
             }
@@ -6243,6 +6265,17 @@ impl EscrowContract {
             .get(&DataKey::ApprovedOracles)
             .unwrap_or_else(|| soroban_sdk::vec![&env]);
 
+        let required: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequiredOracleConfirmations)
+            .unwrap_or(2u32);
+
+        let remaining_count = (oracles.len() as u32).saturating_sub(1);
+        if required > remaining_count {
+            return Err(Error::InvalidAmount);
+        }
+
         let mut updated = soroban_sdk::vec![&env];
         for o in oracles.iter() {
             if o != oracle {
@@ -6281,7 +6314,13 @@ impl EscrowContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
-        if count == 0 {
+        let approved_oracles: soroban_sdk::Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovedOracles)
+            .unwrap_or_else(|| soroban_sdk::vec![&env]);
+
+        if count == 0 || count > approved_oracles.len() as u32 {
             return Err(Error::InvalidAmount);
         }
 
@@ -6394,20 +6433,22 @@ impl EscrowContract {
             .unwrap_or(0);
 
         // If there are existing votes, load the recorded winner and check for conflict.
-        // We store the "leading winner" in a dedicated key once the first vote arrives.
-        let leading_winner_key = DataKey::OracleRecord(match_id);
+        // `OracleRecord` is reserved for the oracle-reported `game_id`, so the leading
+        // winner must live in its own dedicated storage key to avoid deserialization conflicts.
+        let leading_winner_key = DataKey::ConsensusLeadingWinner(match_id);
         if existing_confirmations > 0 {
-            // There are existing votes — check they all agree.
-            // We repurpose OracleRecord(match_id) to store the first-vote Winner.
             let existing_winner: Winner = env
                 .storage()
                 .persistent()
                 .get(&leading_winner_key)
                 .ok_or(Error::ConflictingResult)?;
             if existing_winner != winner {
-                // Soroban rolls back all storage writes made during a call that
-                // returns `Err`, so a conflicting vote cannot itself persist any
-                // record of the disagreement — it's reported only via this error.
+                let required: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::RequiredOracleConfirmations)
+                    .unwrap_or(2u32);
+                Self::mark_oracle_deadlock(&env, match_id, existing_confirmations, required);
                 return Err(Error::ConflictingResult);
             }
         } else {
