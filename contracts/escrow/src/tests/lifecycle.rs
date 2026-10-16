@@ -2512,6 +2512,8 @@ fn test_redeposit_on_fully_funded_active_match_rejected() {
 fn test_expire_match_before_and_after_timeout() {
     let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
+    let third_party = Address::generate(&env);
+    let third_party_client = client.with_source_account(&third_party);
     let token_client = token::Client::new(&env, &token);
 
     // Use the minimum allowed timeout so the test does not have to jump 518_400 ledgers.
@@ -2535,7 +2537,7 @@ fn test_expire_match_before_and_after_timeout() {
     // ── Step 2: expire before timeout must fail ───────────────────────────────
     // Advance to a ledger that is still within the timeout window.
     env.ledger().set_sequence_number(100 + 100);
-    let early_result = client.try_expire_match(&id);
+    let early_result = third_party_client.try_expire_match(&id);
     assert_eq!(
         early_result,
         Err(Ok(Error::MatchNotExpired)),
@@ -2585,7 +2587,7 @@ fn test_expire_match_before_and_after_timeout() {
         .extend_ttl_for_code(token.clone(), MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
 
     // ── Step 4: expire after timeout must succeed ─────────────────────────────
-    client.expire_match(&id);
+    third_party_client.expire_match(&id);
 
     // ── Step 5: verify Cancelled state and full refund ────────────────────────
     let m_after = client.get_match(&id);

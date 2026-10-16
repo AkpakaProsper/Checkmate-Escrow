@@ -318,6 +318,8 @@ pub enum DataKey {
     PlayerPreferredToken(Address),
     /// Platform-wide aggregated statistics (total matches, volume, payouts).
     Stats,
+    /// Statistics scoped to a game platform.
+    PlatformStats(Platform),
     /// Player statistics (wins, losses, draws, total matches, volume staked).
     PlayerStats(Address),
     /// Stores the number of oracle confirmations received for a given match.
@@ -575,7 +577,7 @@ pub enum BalanceAtTimestamp {
     Pruned,
 }
 
-/// Platform-wide aggregated statistics for analytics.
+/// Aggregated statistics for a single game platform.
 ///
 /// Incremented atomically during `create_match` (for total_matches and total_volume)
 /// and `submit_result` (for total_payouts). Used by off-chain analytics to avoid

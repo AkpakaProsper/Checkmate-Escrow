@@ -146,4 +146,12 @@ describe('MatchCard', () => {
     render(<MatchCard {...baseProps} />);
     expect(screen.getByLabelText('active')).toBeTruthy();
   });
+
+  it('renders the platform name', () => {
+    const { rerender } = render(<MatchCard {...baseProps} />);
+    expect(screen.getByText('Lichess')).toBeTruthy();
+
+    rerender(<MatchCard {...baseProps} platform="chessdotcom" />);
+    expect(screen.getByText('Chess.com')).toBeTruthy();
+  });
 });
