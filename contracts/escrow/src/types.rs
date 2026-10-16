@@ -263,7 +263,6 @@ pub enum DataKey {
     AllowedTokenCount,
     AllowlistEnforced,
     AllowedTokens,
-    OracleRecord(u64),
     /// Balance snapshot for a match at a given ring-buffer slot.
     /// Slot = (snapshot index) % MAX_SNAPSHOTS_PER_MATCH — see lib.rs.
     Snapshot(u64, u32),
@@ -322,6 +321,12 @@ pub enum DataKey {
     PlatformStats(Platform),
     /// Player statistics (wins, losses, draws, total matches, volume staked).
     PlayerStats(Address),
+    /// Stores the game_id associated with a match's oracle result.
+    OracleRecord(u64),
+    /// Tracks the current leading consensus winner for a match.
+    /// This is intentionally separate from `OracleRecord`, which stores the
+    /// oracle-reported `game_id` value and must not be repurposed as a winner.
+    ConsensusLeadingWinner(u64),
     /// Stores the number of oracle confirmations received for a given match.
     OracleConfirmations(u64),
     /// Tracks the result (Winner) submitted by a specific oracle for a match.
