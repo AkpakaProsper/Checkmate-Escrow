@@ -192,7 +192,7 @@
         "BalanceSnapshot recorded with reason=Cancelled",
         "PlayerBalanceSnapshot recorded for both players"
       ],
-      "errors": ["MatchNotFound", "MatchAlreadyActive", "Unauthorized"]
+      "errors": ["MatchNotFound", "InvalidState", "Unauthorized"]
     },
     {
       "name": "expire_match",

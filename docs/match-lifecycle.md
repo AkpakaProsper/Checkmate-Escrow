@@ -130,7 +130,7 @@ Same guards as above. Transition to `Active` is automatic when both `player1_dep
 | Guard | Error if violated |
 |---|---|
 | Match exists | `MatchNotFound` |
-| `match.state == Pending` (not `Active`) | `MatchAlreadyActive` if Active; `InvalidState` for other states |
+| `match.state == Pending` | `InvalidState` for every non-`Pending` state, including `Active` |
 | Caller is `player1` or `player2` | `Unauthorized` |
 | `caller.require_auth()` | `Unauthorized` (tx fails) |
 
@@ -194,7 +194,7 @@ Match records in persistent storage share the same ~30-day TTL, extended on ever
 |---|---|---|
 | Call `deposit` after both already deposited | `AlreadyFunded` | Both deposits are complete; match is `Active`. No action needed. |
 | Call `deposit` on an `Active` match | `InvalidState` | Match already fully funded. |
-| Call `cancel_match` on an `Active` match | `MatchAlreadyActive` | Cannot cancel once both players have deposited. |
+| Call `cancel_match` on an `Active` match | `InvalidState` | Cannot cancel once both players have deposited. |
 | Call `expire_match` before timeout elapses | `MatchNotExpired` | Wait until `created_ledger + timeout` ledgers have passed. |
 | Call `submit_result` from a non-oracle address | `Unauthorized` | Only the configured oracle address can submit results. |
 | Call `submit_result` while contract is paused | `ContractPaused` | Admin must unpause the contract first. |

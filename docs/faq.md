@@ -29,7 +29,7 @@ Check `get_match_timeout()` to see the current timeout, and `get_match(match_id)
 
 ### 4. Can a player cancel a match after both have deposited?
 
-No. Once a match transitions to `Active` (both players deposited), only the oracle submitting a result or the timeout expiring can end it. This prevents one player from backing out mid-game. See [error code #19](error-codes.md#code-19-matchalreadyactive).
+No. Once a match transitions to `Active` (both players deposited), only the oracle submitting a result or the timeout expiring can end it. This prevents one player from backing out mid-game. A cancellation attempt returns [error code #5](error-codes.md#code-5-invalidstate).
 
 ### 5. How long does a payout take?
 

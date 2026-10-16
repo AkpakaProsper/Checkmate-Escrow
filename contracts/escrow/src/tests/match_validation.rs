@@ -196,6 +196,39 @@ fn test_tournament_registration_and_round_persistence() {
 }
 
 #[test]
+fn test_bracket_match_index_filters_many_matches_by_bracket() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    client.register_bracket(&admin, &9, &admin);
+    client.register_bracket(&admin, &10, &admin);
+
+    for index in 0..20 {
+        let bracket_id = if index % 2 == 0 { 9 } else { 10 };
+        client.create_match_tournament(
+            &bracket_id,
+            &1,
+            &player1,
+            &player2,
+            &1,
+            &token,
+            &String::from_str(&env, &format!("{:08x}", index)),
+            &Platform::Lichess,
+        );
+    }
+
+    let bracket_nine = client.get_bracket_matches(&9);
+    let bracket_ten = client.get_bracket_matches(&10);
+    assert_eq!(bracket_nine.len(), 10);
+    assert_eq!(bracket_ten.len(), 10);
+    for match_record in bracket_nine.iter() {
+        assert_eq!(match_record.bracket_id, Some(9));
+    }
+    for match_record in bracket_ten.iter() {
+        assert_eq!(match_record.bracket_id, Some(10));
+    }
+}
+
+#[test]
 fn test_tournament_match_requires_registered_bracket() {
     let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);

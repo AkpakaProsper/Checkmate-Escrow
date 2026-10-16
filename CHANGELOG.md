@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `admin_freeze_player` / `admin_unfreeze_player` — targeted per-player freeze that blocks a single address from creating matches and depositing, without pausing the contract for other users. The freeze reason is stored on-chain; `is_player_frozen` / `get_frozen_players` expose state. Fund-recovery paths (cancel/expire/claim) and oracle settlement of existing matches are deliberately unaffected.
 
 ### Fixed
+- Active matches can no longer be cancelled; attempts return `InvalidState`, and the create-match form resets when the connected wallet account changes.
+- Bracket match lookups and state-filtered match queries use maintained indexes instead of scanning the full match history.
 - Active matches with no oracle response are no longer permanently unrecoverable after the 24-hour `dispute_and_rollback_match` window elapses. The new admin recovery function closes the gap identified in Issue #1274, ensuring funds can always be recovered after a bounded stall period.
 
 ## [1.0.0] - 2026-06-29

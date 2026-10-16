@@ -1160,7 +1160,6 @@ paths:
         | 1  | MatchNotFound     | No match for `match_id` |
         | 4  | Unauthorized      | `caller` is not player1 or player2 |
         | 5  | InvalidState      | Match is not `Pending` |
-        | 19 | MatchAlreadyActive | Match is already `Active` |
       operationId: cancelMatch
       security:
         - SorobanPlayerAuth: []
