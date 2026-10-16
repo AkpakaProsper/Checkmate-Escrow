@@ -2652,6 +2652,49 @@ fn test_mofn_threshold_not_reached_match_stays_pending() {
     assert_eq!(votes.candidates.get(0).unwrap().submitters.len(), 2);
 }
 
+#[test]
+fn test_mofn_vote_tally_refreshes_when_oracle_becomes_eligible() {
+    let (env, contract_id, _escrow_id, _admin, _p1, _p2, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    client.set_consensus_threshold(&2);
+    let initial_oracles = register_n_oracles(&env, &client, &token_addr, 2, 500);
+    client.submit_oracle_result(
+        &initial_oracles[0],
+        &0u64,
+        &String::from_str(&env, "g"),
+        &Platform::Lichess,
+        &Winner::Player1,
+        &1000u64,
+    );
+
+    let newly_eligible = register_n_oracles(&env, &client, &token_addr, 1, 500)
+        .into_iter()
+        .next()
+        .unwrap();
+    client.submit_oracle_result(
+        &initial_oracles[1],
+        &0u64,
+        &String::from_str(&env, "g"),
+        &Platform::Lichess,
+        &Winner::Player2,
+        &1000u64,
+    );
+
+    assert!(!client.get_match_votes(&0u64).unwrap().disputed);
+    client.submit_oracle_result(
+        &newly_eligible,
+        &0u64,
+        &String::from_str(&env, "g"),
+        &Platform::Lichess,
+        &Winner::Player1,
+        &1000u64,
+    );
+
+    assert!(client.has_result(&0u64));
+    assert_eq!(client.get_result(&0u64).result, Winner::Player1);
+}
+
 /// Conflicting submissions that still resolve to consensus: the losing
 /// (minority) oracle is automatically slashed once the majority finalizes.
 #[test]

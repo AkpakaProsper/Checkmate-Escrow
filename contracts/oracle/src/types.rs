@@ -97,6 +97,14 @@ pub struct ConsensusState {
     pub disputed: bool,
 }
 
+/// Cached number of eligible oracles that have not yet voted on a match.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VoteTally {
+    pub remaining_eligible: u32,
+    pub eligibility_version: u32,
+}
+
 /// A stored exchange rate entry, pairing the rate value with the ledger
 /// sequence at which it was last set. Allows callers to detect stale rates
 /// before executing a swap.
@@ -132,6 +140,10 @@ pub enum DataKey {
     /// In-progress consensus tally for a match, keyed by match_id. Removed
     /// once the match is finalized.
     MatchVotes(u64),
+    /// Cached number of eligible oracles still able to vote, keyed by match_id.
+    VoteTally(u64),
+    /// Incremented whenever an oracle becomes eligible or ineligible to vote.
+    OracleEligibilityVersion,
     /// A single oracle's recorded vote for a match, keyed by (match_id, oracle).
     OracleVote(u64, Address),
     /// Metrics tracking and SLA performance indicators for an oracle.

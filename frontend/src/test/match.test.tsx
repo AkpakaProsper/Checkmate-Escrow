@@ -38,6 +38,14 @@ describe('DepositButton', () => {
     fireEvent.click(screen.getByRole('button'));
     await waitFor(() => screen.getByRole('status'));
     expect(screen.getByRole('status').textContent).toBe('Deposit successful!');
+    expect(screen.getByRole('button').textContent).toBe('Deposited');
+    expect(screen.getByRole('button')).toBeDisabled();
+  });
+
+  it('disables the button when the player has already deposited', () => {
+    render(<DepositButton matchId={2} deposited onDeposit={vi.fn()} />);
+    expect(screen.getByRole('button').textContent).toBe('Deposited');
+    expect(screen.getByRole('button')).toBeDisabled();
   });
 
   it('shows error feedback on failure', async () => {

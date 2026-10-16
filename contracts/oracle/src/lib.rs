@@ -24,7 +24,7 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Str
 use types::{
     BatchResultEntry, CandidateTally, ConsensusState, DataKey, OracleMetrics, OracleRegistration,
     OracleSubmissionEntry, OracleVoteRecord, PendingSlash, Platform, RateLimitConfig,
-    RateLimitStatus, RateWindow, RateEntry, ResultEntry, Winner,
+    RateLimitStatus, RateWindow, RateEntry, ResultEntry, VoteTally, Winner,
 };
 
 /// Maximum response time SLA threshold, in milliseconds (5 seconds).
@@ -200,6 +200,10 @@ impl OracleContract {
 
         let registration_key = DataKey::OracleRegistration(oracle_address.clone());
         let existing: Option<OracleRegistration> = env.storage().instance().get(&registration_key);
+        let was_eligible = existing
+            .as_ref()
+            .map(|registration| registration.oracle_stake > 0)
+            .unwrap_or(false);
 
         if let Some(existing) = &existing {
             if existing.token != token {
@@ -227,6 +231,9 @@ impl OracleContract {
                 token: token.clone(),
             },
         );
+        if !was_eligible {
+            Self::bump_oracle_eligibility_version(&env);
+        }
 
         let mut oracle_set: Vec<Address> = env
             .storage()
@@ -443,11 +450,15 @@ impl OracleContract {
             .ok_or(Error::InsufficientStake)?;
 
         let slash_amount = pending.slash_amount.min(registration.oracle_stake);
+        let was_eligible = registration.oracle_stake > 0;
         registration.oracle_stake -= slash_amount;
         env.storage().instance().set(
             &DataKey::OracleRegistration(oracle_address.clone()),
             &registration,
         );
+        if was_eligible && registration.oracle_stake == 0 {
+            Self::bump_oracle_eligibility_version(&env);
+        }
         env.storage().instance().remove(&key);
 
         if slash_amount > 0 {
@@ -988,6 +999,9 @@ impl OracleContract {
             env.storage()
                 .persistent()
                 .remove(&DataKey::MatchVotes(match_id));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::VoteTally(match_id));
 
             env.events().publish(
                 (Symbol::new(&env, "oracle"), symbol_short!("result")),
@@ -1127,6 +1141,9 @@ impl OracleContract {
         env.storage()
             .persistent()
             .remove(&DataKey::MatchVotes(match_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::VoteTally(match_id));
 
         env.events().publish(
             (Symbol::new(&env, "oracle"), symbol_short!("resolved")),
@@ -1426,12 +1443,44 @@ impl OracleContract {
             .extend_ttl(&list_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
     }
 
-    /// Count registered oracles that (a) still hold a positive stake and
-    /// (b) have not yet voted on `match_id` — the maximum number of
-    /// additional votes any candidate could still receive. Used to detect an
-    /// irreconcilable deadlock: if no candidate's current tally plus this
-    /// count can reach the threshold, consensus is no longer achievable.
+    /// Return the number of eligible oracles that have not yet voted after
+    /// the current submission. The first vote after an eligibility change
+    /// refreshes the cache; subsequent submissions decrement it in constant
+    /// time instead of scanning every registered oracle.
     fn remaining_eligible_oracles(env: &Env, match_id: u64) -> u32 {
+        let version = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleEligibilityVersion)
+            .unwrap_or(0u32);
+        let tally_key = DataKey::VoteTally(match_id);
+        let remaining = match env
+            .storage()
+            .persistent()
+            .get::<_, VoteTally>(&tally_key)
+        {
+            Some(tally) if tally.eligibility_version == version => {
+                tally.remaining_eligible.saturating_sub(1)
+            }
+            _ => Self::count_remaining_eligible_oracles(env, match_id),
+        };
+
+        env.storage().persistent().set(
+            &tally_key,
+            &VoteTally {
+                remaining_eligible: remaining,
+                eligibility_version: version,
+            },
+        );
+        env.storage().persistent().extend_ttl(
+            &tally_key,
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
+        remaining
+    }
+
+    fn count_remaining_eligible_oracles(env: &Env, match_id: u64) -> u32 {
         let set: Vec<Address> = env
             .storage()
             .instance()
@@ -1461,6 +1510,18 @@ impl OracleContract {
         remaining
     }
 
+    fn bump_oracle_eligibility_version(env: &Env) {
+        let version = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleEligibilityVersion)
+            .unwrap_or(0u32)
+            .saturating_add(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleEligibilityVersion, &version);
+    }
+
     /// Slash `bps` basis points of `oracle`'s remaining stake, transferring
     /// the slashed amount to the admin (treasury). No-op if the oracle is not
     /// registered or has no remaining stake. Returns the amount slashed.
@@ -1483,6 +1544,9 @@ impl OracleContract {
         registration.oracle_stake -= amount;
         let token = registration.token.clone();
         env.storage().instance().set(&key, &registration);
+        if registration.oracle_stake == 0 {
+            Self::bump_oracle_eligibility_version(env);
+        }
 
         if let Some(admin) = env.storage().instance().get::<_, Address>(&DataKey::Admin) {
             let token_client = token::Client::new(env, &token);
