@@ -363,23 +363,26 @@ fn error_invalid_address() {
     assert_eq!(result, Err(Ok(Error::InvalidAddress)));
 }
 
-// ── 19: MatchAlreadyActive ───────────────────────────────────────────────────
+// ── Active match cancellation ────────────────────────────────────────────────
 
 #[test]
-fn error_match_already_active() {
+fn error_cancel_active_match_returns_invalid_state() {
     let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let mid = client.create_match(
-        &player1, &player2, &100, &token,
-        &String::from_str(&env, "ev_maa01"),
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "e7aa0101"),
         &Platform::Lichess,
     );
     client.deposit(&mid, &player1);
     client.deposit(&mid, &player2);
-    // Match is now Active — cancelling an active match returns MatchAlreadyActive.
+    // Match is now Active — cancelling an active match returns InvalidState.
     let result = client.try_cancel_match(&mid, &player1);
-    assert_eq!(result, Err(Ok(Error::MatchAlreadyActive)));
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
 }
 
 // ── 20: InvalidTimeout ───────────────────────────────────────────────────────

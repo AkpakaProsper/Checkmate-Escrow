@@ -223,6 +223,44 @@ fn test_get_pending_matches_returns_only_pending_matches() {
 }
 
 #[test]
+fn test_state_indexes_track_many_matches_across_transitions() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    for index in 0..24 {
+        let match_id = client.create_match(
+            &player1,
+            &player2,
+            &1,
+            &token,
+            &String::from_str(&env, &format!("{:08x}", index)),
+            &Platform::Lichess,
+        );
+
+        match index % 3 {
+            0 => {
+                client.deposit(&match_id, &player1);
+                client.deposit(&match_id, &player2);
+            }
+            1 => client.cancel_match(&match_id, &player1),
+            _ => {}
+        }
+    }
+
+    let pending = client.get_pending_matches();
+    let active = client.get_active_matches();
+    let cancelled = client.get_cancelled_matches_paginated(&0, &24);
+    assert_eq!(pending.len(), 8);
+    assert_eq!(active.len(), 8);
+    assert_eq!(cancelled.len(), 8);
+
+    let active_page = client.get_active_matches_paginated(&3, &2);
+    assert_eq!(active_page.len(), 2);
+    assert_eq!(active_page.get(0).unwrap().id, active.get(3).unwrap().id);
+    assert_eq!(active_page.get(1).unwrap().id, active.get(4).unwrap().id);
+}
+
+#[test]
 fn test_match_transitions_from_pending_to_active_matches() {
     let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);

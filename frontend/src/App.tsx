@@ -76,7 +76,7 @@ function App() {
             <WalletConnector wallet={wallet} />
           </div>
         ) : (
-          <CreateMatchForm onSubmit={() => {
+          <CreateMatchForm key={wallet.publicKey} onSubmit={() => {
             // TODO: Handle form submission
           }} />
         )}

@@ -335,6 +335,14 @@ pub enum DataKey {
     OracleRotation,
 }
 
+/// Match lookup indexes are separated from `DataKey` because its Soroban
+/// contract-type enum has reached the variant limit.
+#[contracttype]
+pub enum MatchIndexKey {
+    BracketMatches(u64),
+    MatchesByState(MatchState),
+}
+
 /// Storage keys for tournament bracket registration.
 #[contracttype]
 pub enum BracketKey {

@@ -804,8 +804,8 @@ fn test_cancel_active_match_fails_with_invalid_state() {
     let result = client.try_cancel_match(&id, &player1);
     assert_eq!(
         result,
-        Err(Ok(Error::MatchAlreadyActive)),
-        "expected MatchAlreadyActive error when cancelling an Active match"
+        Err(Ok(Error::InvalidState)),
+        "expected InvalidState error when cancelling an Active match"
     );
 
     assert_eq!(client.get_match(&id).state, MatchState::Active);
@@ -833,7 +833,7 @@ fn test_cancel_active_match_returns_match_already_active() {
     assert_eq!(client.get_match(&id).state, MatchState::Active);
 
     let result = client.try_cancel_match(&id, &player1);
-    assert_eq!(result, Err(Ok(Error::MatchAlreadyActive)));
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
 }
 
 #[test]
@@ -874,10 +874,7 @@ fn test_cancel_match_on_cancelled_match_returns_error() {
     assert_eq!(client.get_match(&id).state, MatchState::Cancelled);
 
     let result = client.try_cancel_match(&id, &player1);
-    assert!(
-        matches!(result, Err(Ok(Error::MatchAlreadyActive)) | Err(Ok(Error::InvalidState))),
-        "Expected MatchAlreadyActive or InvalidState error when cancelling an already cancelled match"
-    );
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
 }
 
 #[test]
@@ -2688,12 +2685,12 @@ fn test_cancel_match_rejects_when_active() {
     // Confirm the match is now Active before attempting the cancel.
     assert_eq!(client.get_match(&id).state, MatchState::Active);
 
-    // Attempt to cancel as player1 — must be rejected with MatchAlreadyActive.
+    // Attempt to cancel as player1 — must be rejected with InvalidState.
     let result = client.try_cancel_match(&id, &player1);
     assert_eq!(
         result,
-        Err(Ok(Error::MatchAlreadyActive)),
-        "cancel_match must return MatchAlreadyActive when the match is in Active state"
+        Err(Ok(Error::InvalidState)),
+        "cancel_match must return InvalidState when the match is in Active state"
     );
 
     // The match state must remain Active (no side-effects from the failed call).

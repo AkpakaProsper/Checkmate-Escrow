@@ -351,9 +351,9 @@ fn test_stalled_match_unrecoverable_via_existing_functions() {
 
     // Try all existing recovery functions — all should fail.
 
-    // 1. cancel_match — only works for Pending matches (returns MatchAlreadyActive for Active).
+    // 1. cancel_match — only works for Pending matches.
     let result = client.try_cancel_match(&id, &player1);
-    assert_eq!(result, Err(Ok(Error::MatchAlreadyActive)));
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
 
     // 2. expire_match — only works for Pending matches.
     let result = client.try_expire_match(&id);

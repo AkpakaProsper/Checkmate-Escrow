@@ -1,6 +1,6 @@
 # Storage Layout Reference
 
-This document is the authoritative reference for every `DataKey` variant used by the Escrow contract. It maps each key to its value type, storage scope, TTL behaviour, and purpose. It is intended for upgrade engineers, tooling authors, and anyone auditing contract storage safety.
+This document is the authoritative reference for every storage key used by the Escrow contract. It maps each key to its value type, storage scope, TTL behaviour, and purpose. It is intended for upgrade engineers, tooling authors, and anyone auditing contract storage safety.
 
 ## Storage Scopes
 
@@ -59,6 +59,15 @@ All TTL values are expressed in **ledger sequence numbers** (5 s/ledger on Stell
 | `ActiveMatch(Address, u64)` | `()` (unit) | Persistent | Extended on write | O(1) lookup for whether a specific match is currently active for a player. Cleared on completion or cancellation. |
 | `PlayerActiveMatchCount(Address)` | `u32` | Persistent | Extended on write | Count of currently active matches for a player. Capped at `MAX_ACTIVE_MATCHES_PER_PLAYER`. |
 | `PlayerCompletedMatchCount(Address)` | `u32` | Persistent | Extended on write | Running count of completed matches for a player. Used for dispute vote eligibility. |
+
+## MatchIndexKey (Separate Enum)
+
+> Kept separate from `DataKey` because Soroban caps a single enum at 50 variants, and `DataKey` is already at that limit.
+
+| MatchIndexKey variant | Value type | Storage scope | TTL behaviour | Description |
+|---|---|---|---|---|
+| `BracketMatches(u64)` | `Vec<u64>` | Persistent | Extended on write | Sorted match IDs for a tournament bracket. Updated when a tournament match is created and used by `get_bracket_matches`. |
+| `MatchesByState(MatchState)` | `Vec<u64>` | Persistent | Extended on write | Sorted match IDs currently in a lifecycle state. Updated at creation and every state transition; used by state-filtered getters. |
 
 ### Token Allowlist
 
@@ -145,7 +154,7 @@ All TTL values are expressed in **ledger sequence numbers** (5 s/ledger on Stell
 
 ## Upgrade Safety Checklist
 
-When adding a new `DataKey` variant or changing an existing value type, ensure:
+When adding a new storage-key variant or changing an existing value type, ensure:
 
 1. **Migration hook** — add a branch in `migrate_state` if the key needs a one-time data transformation.
 2. **TTL extension** — confirm the key's TTL is bumped on every write that expects the data to be long-lived.
@@ -154,7 +163,7 @@ When adding a new `DataKey` variant or changing an existing value type, ensure:
 
 ## Cross-References
 
-- Implementation: [`contracts/escrow/src/types.rs`](../contracts/escrow/src/types.rs) — `DataKey` and `OracleConsensusKey` enums
+- Implementation: [`contracts/escrow/src/types.rs`](../contracts/escrow/src/types.rs) — `DataKey`, `MatchIndexKey`, and `OracleConsensusKey` enums
 - Contract logic: [`contracts/escrow/src/lib.rs`](../contracts/escrow/src/lib.rs) — all read/write sites
 - Architecture overview: [`docs/architecture.md`](architecture.md)
 - Upgrade safety guide: [`docs/upgrade-safety.md`](upgrade-safety.md)

@@ -1249,6 +1249,71 @@ impl EscrowContract {
         Ok(())
     }
 
+    fn add_match_to_index(env: &Env, key: MatchIndexKey, match_id: u64) {
+        let mut match_ids: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::vec![env]);
+        if match_ids.iter().any(|indexed_id| indexed_id == match_id) {
+            return;
+        }
+
+        let mut sorted_ids = soroban_sdk::vec![env];
+        let mut inserted = false;
+        for indexed_id in match_ids.iter() {
+            if !inserted && match_id < indexed_id {
+                sorted_ids.push_back(match_id);
+                inserted = true;
+            }
+            sorted_ids.push_back(indexed_id);
+        }
+        if !inserted {
+            sorted_ids.push_back(match_id);
+        }
+
+        env.storage().persistent().set(&key, &sorted_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+    }
+
+    fn remove_match_from_index(env: &Env, key: MatchIndexKey, match_id: u64) {
+        let match_ids: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::vec![env]);
+        let mut remaining_ids = soroban_sdk::vec![env];
+        for indexed_id in match_ids.iter() {
+            if indexed_id != match_id {
+                remaining_ids.push_back(indexed_id);
+            }
+        }
+
+        if remaining_ids.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &remaining_ids);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        }
+    }
+
+    fn set_match_state(env: &Env, m: &mut Match, state: MatchState) {
+        if m.state == state {
+            return;
+        }
+        Self::remove_match_from_index(
+            env,
+            MatchIndexKey::MatchesByState(m.state.clone()),
+            m.id,
+        );
+        Self::add_match_to_index(env, MatchIndexKey::MatchesByState(state.clone()), m.id);
+        m.state = state;
+    }
+
     fn create_match_internal(env: Env, params: MatchParams) -> Result<u64, Error> {
         extend_instance_ttl(&env);
         params.player1.require_auth();
@@ -1425,6 +1490,18 @@ impl EscrowContract {
             MATCH_TTL_LEDGERS,
             MATCH_TTL_LEDGERS,
         );
+        Self::add_match_to_index(
+            &env,
+            MatchIndexKey::MatchesByState(MatchState::Pending),
+            id,
+        );
+        if let Some(bracket_id) = m.bracket_id {
+            Self::add_match_to_index(
+                &env,
+                MatchIndexKey::BracketMatches(bracket_id),
+                id,
+            );
+        }
         env.storage().instance().set(&DataKey::MatchCount, &next_id);
         env.storage()
             .persistent()
@@ -1596,18 +1673,19 @@ impl EscrowContract {
 
     /// Get all matches for a specific tournament bracket.
     pub fn get_bracket_matches(env: Env, bracket_id: u64) -> soroban_sdk::Vec<Match> {
-        let match_count: u64 = env
+        let key = MatchIndexKey::BracketMatches(bracket_id);
+        let match_ids: soroban_sdk::Vec<u64> = env
             .storage()
-            .instance()
-            .get(&DataKey::MatchCount)
-            .unwrap_or(0);
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::vec![&env]);
         let mut bracket_matches = soroban_sdk::vec![&env];
 
-        for i in 0..match_count {
+        for match_id in match_ids.iter() {
             if let Some(m) = env
                 .storage()
                 .persistent()
-                .get::<_, Match>(&DataKey::Match(i))
+                .get::<_, Match>(&DataKey::Match(match_id))
             {
                 if m.bracket_id == Some(bracket_id) {
                     bracket_matches.push_back(m);
@@ -1800,7 +1878,7 @@ impl EscrowContract {
         m.last_heartbeat = env.ledger().timestamp();
 
         if m.player1_deposited && m.player2_deposited {
-            m.state = MatchState::Active;
+            Self::set_match_state(&env, &mut m, MatchState::Active);
             // Record activation timestamp for the stall-window baseline (#1518).
             m.activated_at = Some(env.ledger().timestamp());
             env.events().publish(
@@ -1949,7 +2027,7 @@ impl EscrowContract {
         Self::remove_active_match_indexed(env, &m.player1, match_id);
         Self::remove_active_match_indexed(env, &m.player2, match_id);
 
-        m.state = MatchState::Completed;
+        Self::set_match_state(env, &mut m, MatchState::Completed);
         m.winner = winner.clone();
         m.vested_at = Some(env.ledger().timestamp());
 
@@ -2011,7 +2089,7 @@ impl EscrowContract {
                 .checked_add(dispute_period)
                 .ok_or(Error::Overflow)?;
 
-            m.state = MatchState::PendingResult;
+            Self::set_match_state(env, &mut m, MatchState::PendingResult);
 
             env.storage()
                 .persistent()
@@ -2230,11 +2308,7 @@ impl EscrowContract {
             .ok_or(Error::MatchNotFound)?;
 
         if m.state != MatchState::Pending {
-            return Err(if m.state == MatchState::Active {
-                Error::MatchAlreadyActive
-            } else {
-                Error::InvalidState
-            });
+            return Err(Error::InvalidState);
         }
 
         // Either player1 or player2 can cancel a pending match
@@ -2310,7 +2384,7 @@ impl EscrowContract {
             }
         }
 
-        m.state = MatchState::Cancelled;
+        Self::set_match_state(&env, &mut m, MatchState::Cancelled);
         m.completed_ledger = Some(env.ledger().sequence());
         env.storage()
             .persistent()
@@ -2389,7 +2463,7 @@ impl EscrowContract {
             return Err(Error::InvalidPauseState);
         }
 
-        m.state = MatchState::Paused;
+        Self::set_match_state(&env, &mut m, MatchState::Paused);
         m.paused_ledger = Some(env.ledger().sequence());
         env.storage()
             .persistent()
@@ -2439,7 +2513,7 @@ impl EscrowContract {
             m.total_pause_duration = m.total_pause_duration.saturating_add(pause_duration);
         }
 
-        m.state = MatchState::Active;
+        Self::set_match_state(&env, &mut m, MatchState::Active);
         m.paused_ledger = None;
         env.storage()
             .persistent()
@@ -2520,7 +2594,7 @@ impl EscrowContract {
             client_b.transfer(&env.current_contract_address(), &m.player2, &amount_b);
         }
 
-        m.state = MatchState::Cancelled;
+        Self::set_match_state(&env, &mut m, MatchState::Cancelled);
         m.completed_ledger = Some(env.ledger().sequence());
         env.storage()
             .persistent()
@@ -2631,7 +2705,7 @@ impl EscrowContract {
             }));
         }
 
-        m.state = MatchState::Cancelled;
+        Self::set_match_state(&env, &mut m, MatchState::Cancelled);
         m.completed_ledger = Some(env.ledger().sequence());
         env.storage()
             .persistent()
@@ -2829,7 +2903,7 @@ impl EscrowContract {
 
         // Finalize the match as cancelled and stamp the completion ledger so
         // downstream code that reads `completed_ledger` sees a terminal time.
-        m.state = MatchState::Cancelled;
+        Self::set_match_state(&env, &mut m, MatchState::Cancelled);
         m.completed_ledger = Some(env.ledger().sequence());
         env.storage()
             .persistent()
@@ -3102,7 +3176,7 @@ impl EscrowContract {
         }
 
         // Finalize the match as Completed and stamp the completion ledger.
-        m.state = MatchState::Completed;
+        Self::set_match_state(&env, &mut m, MatchState::Completed);
         m.winner = resolution.clone();
         m.completed_ledger = Some(env.ledger().sequence());
         env.storage()
@@ -3912,7 +3986,7 @@ impl EscrowContract {
         Self::update_player_escrow_balance(&env, &m.player1, -m.stake_amount);
         Self::update_player_escrow_balance(&env, &m.player2, -m.stake_amount);
 
-        m.state = MatchState::Completed;
+        Self::set_match_state(&env, &mut m, MatchState::Completed);
         m.completed_ledger = Some(env.ledger().sequence());
 
         Self::record_completed_match(&env, &m.player1);
@@ -4341,7 +4415,7 @@ impl EscrowContract {
             );
         }
 
-        m.state = MatchState::Completed;
+        Self::set_match_state(&env, &mut m, MatchState::Completed);
         m.completed_ledger = Some(env.ledger().sequence());
 
         Self::record_completed_match(&env, &m.player1);
@@ -5093,26 +5167,21 @@ impl EscrowContract {
         result
     }
 
-    /// Collect all matches in a given state (DEPRECATED: use paginated variants).
-    /// Returns at most MAX_UNBOUNDED_MATCH_RESULTS to cap per-call cost.
-    /// This function scans the full match history and is included for backwards
-    /// compatibility only; new code should use collect_matches_by_state_paginated.
+    /// Collect matches in a given state (DEPRECATED: use paginated variants).
+    /// Returns at most MAX_UNBOUNDED_MATCH_RESULTS indexed matches.
     fn collect_matches_by_state(
         env: &Env,
         state: MatchState,
     ) -> Result<soroban_sdk::Vec<Match>, Error> {
         let mut matches = soroban_sdk::vec![env];
-        let count: u64 = env
+        let match_ids: soroban_sdk::Vec<u64> = env
             .storage()
-            .instance()
-            .get(&DataKey::MatchCount)
-            .unwrap_or(0);
+            .persistent()
+            .get(&MatchIndexKey::MatchesByState(state.clone()))
+            .unwrap_or_else(|| soroban_sdk::vec![env]);
 
-        let mut collected = 0u32;
-        let mut truncated = false;
-        for match_id in 0..count {
-            if collected >= MAX_UNBOUNDED_MATCH_RESULTS {
-                truncated = true;
+        for (index, match_id) in match_ids.iter().enumerate() {
+            if index >= MAX_UNBOUNDED_MATCH_RESULTS as usize {
                 break;
             }
             if let Some(m) = env
@@ -5122,12 +5191,11 @@ impl EscrowContract {
             {
                 if m.state == state {
                     matches.push_back(m);
-                    collected = collected.saturating_add(1);
                 }
             }
         }
 
-        if truncated {
+        if match_ids.len() > MAX_UNBOUNDED_MATCH_RESULTS {
             // Silent data loss otherwise: callers of the deprecated unbounded
             // getters have no other signal that results were capped.
             env.events().publish(
@@ -5150,31 +5218,23 @@ impl EscrowContract {
             return Ok(matches);
         }
 
-        let count: u64 = env
+        let match_ids: soroban_sdk::Vec<u64> = env
             .storage()
-            .instance()
-            .get(&DataKey::MatchCount)
-            .unwrap_or(0);
-        let mut skipped = 0u32;
-        let mut added = 0u32;
+            .persistent()
+            .get(&MatchIndexKey::MatchesByState(state.clone()))
+            .unwrap_or_else(|| soroban_sdk::vec![env]);
+        let start = offset.min(match_ids.len());
+        let end = start.saturating_add(limit).min(match_ids.len());
 
-        for match_id in 0..count {
+        for index in start..end {
+            let match_id = match_ids.get(index).unwrap();
             if let Some(m) = env
                 .storage()
                 .persistent()
                 .get::<DataKey, Match>(&DataKey::Match(match_id))
             {
-                if m.state != state {
-                    continue;
-                }
-                if skipped < offset {
-                    skipped = skipped.saturating_add(1);
-                    continue;
-                }
-                matches.push_back(m);
-                added = added.saturating_add(1);
-                if added >= limit {
-                    break;
+                if m.state == state {
+                    matches.push_back(m);
                 }
             }
         }
@@ -5229,13 +5289,8 @@ impl EscrowContract {
     /// Useful for off-chain clients and the frontend to display match history and
     /// payout records without relying on event indexing.
     ///
-    /// # Storage cost note
-    ///
-    /// This function scans every match ever created in linear time. For contracts with
-    /// a large number of matches this may become expensive. Prefer
-    /// `get_completed_matches_paginated` for production use cases where the total
-    /// match count could grow unboundedly — it lets callers fetch results in bounded
-    /// pages rather than loading the entire history in a single call.
+    /// Uses the per-state match index; prefer the paginated variant when the
+    /// completed-match history may exceed the unbounded result cap.
     pub fn get_completed_matches(env: Env) -> Result<soroban_sdk::Vec<Match>, Error> {
         Self::collect_matches_by_state(&env, MatchState::Completed)
     }

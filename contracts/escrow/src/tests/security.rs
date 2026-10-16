@@ -318,7 +318,7 @@ fn test_security_cancel_active_match_attack() {
     let result = client.try_cancel_match(&match_id, &player1);
     assert!(
         result.is_err(),
-        "Cannot cancel active match (MatchAlreadyActive)"
+        "Cannot cancel active match (InvalidState)"
     );
 }
 
