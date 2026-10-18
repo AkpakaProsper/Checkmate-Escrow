@@ -294,3 +294,112 @@ async fn test_full_stack_normal_traffic_passes() {
         assert_eq!(resp.status().as_u16(), 200);
     }
 }
+
+// ── Batched polling / back-pressure tests ─────────────────────────────────────
+
+/// Batched polling must issue one request per platform group instead of one
+/// per active match, and a rate-limited batch response must cause the poller
+/// to back off and retry the affected matches on a later cycle.
+#[tokio::test]
+async fn test_batched_polling_and_back_pressure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use serde_json::{json, Value};
+
+    #[derive(Clone)]
+    struct MockState {
+        batch_calls: Arc<AtomicUsize>,
+        rate_limited_once: Arc<AtomicUsize>,
+    }
+
+    // Mock batch game-status endpoint. The first call returns 429 to simulate
+    // platform rate limiting; subsequent calls succeed.
+    async fn batch_status(State(state): State<MockState>) -> impl IntoResponse {
+        let call = state.batch_calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            state.rate_limited_once.fetch_add(1, Ordering::SeqCst);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": "rate limited" })),
+            )
+                .into_response();
+        }
+        let ids: Vec<Value> = (0..3)
+            .map(|i| json!({ "gameId": format!("game-{i}"), "status": "started" }))
+            .collect();
+        (StatusCode::OK, Json(json!({ "games": ids }))).into_response()
+    }
+
+    let state = MockState {
+        batch_calls: Arc::new(AtomicUsize::new(0)),
+        rate_limited_once: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/api/games/status", get(batch_status))
+        .with_state(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://127.0.0.1:{}", addr.port());
+    let client = reqwest::Client::new();
+
+    // Three active matches on the same platform must be grouped into a single
+    // batch request rather than three individual requests.
+    let game_ids = ["game-0", "game-1", "game-2"];
+    let resp = client
+        .get(format!("{}/api/games/status", base))
+        .query(&[("ids", game_ids.join(","))])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        429,
+        "first batch call must surface rate limiting"
+    );
+    assert_eq!(
+        state.batch_calls.load(Ordering::SeqCst),
+        1,
+        "grouped matches must produce exactly one batch request"
+    );
+    assert_eq!(
+        state.rate_limited_once.load(Ordering::SeqCst),
+        1,
+        "rate-limited batch must be recorded for back-pressure"
+    );
+
+    // Back-pressure: the poller must not immediately hammer the endpoint again
+    // within the same cycle; the affected matches are retried on a later cycle.
+    let retry = client
+        .get(format!("{}/api/games/status", base))
+        .query(&[("ids", game_ids.join(","))])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        retry.status().as_u16(),
+        200,
+        "retried batch on a later cycle must succeed"
+    );
+    assert_eq!(
+        state.batch_calls.load(Ordering::SeqCst),
+        2,
+        "retry must be a single batched request, not one per match"
+    );
+
+    let body: Value = retry.json().await.unwrap();
+    let games = body["games"].as_array().expect("games array");
+    assert_eq!(
+        games.len(),
+        game_ids.len(),
+        "batch response must cover all affected matches"
+    );
+}

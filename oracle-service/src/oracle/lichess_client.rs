@@ -67,6 +67,9 @@ impl Default for LichessClient {
 }
 
 impl LichessClient {
+    /// Maximum number of game IDs sent in a single batch request.
+    const BATCH_SIZE: usize = 50;
+
     /// Create a client with production defaults.
     pub fn new() -> Result<Self, LichessError> {
         Self::with_config(LichessClientConfig::default())
@@ -178,6 +181,122 @@ impl LichessClient {
         Ok(LichessGameResult { winner })
     }
 
+    /// Fetch results for many games in a single batched request.
+    ///
+    /// Uses Lichess's batch game-status endpoint
+    /// (`/api/games/status?ids=...`), which accepts a comma-separated list of
+    /// game IDs.  IDs are chunked into bounded batches; each batch consumes a
+    /// single rate-limit token and a single concurrency permit.
+    ///
+    /// Returns a vector of `(game_id, result)` pairs in the same order as the
+    /// input.  Games that are not present in the batch response (e.g. still in
+    /// progress or unknown) map to [`LichessError::GameNotFound`].
+    ///
+    /// If the batch endpoint responds with `429 Too Many Requests`, a
+    /// [`LichessError::RateLimited`] is returned so the caller can apply
+    /// back-pressure.
+    pub async fn fetch_results_batch(
+        &self,
+        game_ids: &[String],
+    ) -> Result<Vec<(String, Result<LichessGameResult, LichessError>)>, LichessError> {
+        // Validate every ID up front; invalid IDs are reported per-game.
+        let mut results: Vec<(String, Result<LichessGameResult, LichessError>)> =
+            Vec::with_capacity(game_ids.len());
+        let mut valid_ids: Vec<&String> = Vec::with_capacity(game_ids.len());
+        for id in game_ids {
+            match Self::validate_game_id(id) {
+                Ok(()) => valid_ids.push(id),
+                Err(e) => results.push((id.clone(), Err(e))),
+            }
+        }
+
+        // Chunk valid IDs into bounded batches.
+        for chunk in valid_ids.chunks(Self::BATCH_SIZE) {
+            let ids_param = chunk
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            // 1. Acquire a single rate-limit token for the whole batch.
+            self.rate_limiter.acquire().await;
+
+            // 2. Acquire a single concurrency permit for the whole batch.
+            let _permit: OwnedSemaphorePermit = self
+                .semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore closed");
+
+            // 3. Issue the batched HTTP request.
+            let url = format!(
+                "{}/api/games/status?ids={}",
+                self.api_base.trim_end_matches('/'),
+                ids_param
+            );
+
+            let resp = self
+                .http
+                .get(&url)
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        LichessError::Timeout
+                    } else {
+                        LichessError::Http(e)
+                    }
+                })?;
+
+            let status = resp.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or(Duration::from_secs(60));
+                return Err(LichessError::RateLimited { retry_after });
+            }
+            if !status.is_success() {
+                return Err(LichessError::HttpStatus { status });
+            }
+
+            let body: Vec<LichessGameStatus> = resp.json().await.map_err(LichessError::Http)?;
+
+            // Index the batch response by game ID.
+            let mut by_id: std::collections::HashMap<String, LichessGameStatus> =
+                std::collections::HashMap::with_capacity(body.len());
+            for entry in body {
+                by_id.insert(entry.id.clone(), entry);
+            }
+
+            for id in chunk {
+                let result = match by_id.remove(id.as_str()) {
+                    Some(entry) => match entry.winner.as_deref() {
+                        Some("white") => Ok(LichessGameResult {
+                            winner: Winner::Player1,
+                        }),
+                        Some("black") => Ok(LichessGameResult {
+                            winner: Winner::Player2,
+                        }),
+                        None => Ok(LichessGameResult {
+                            winner: Winner::Draw,
+                        }),
+                        _ => Err(LichessError::InvalidResponse),
+                    },
+                    None => Err(LichessError::GameNotFound),
+                };
+                results.push((id.clone(), result));
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Health check: test connectivity to the Lichess API.
     pub async fn health_check(&self) -> Result<(), LichessError> {
         let _permit: OwnedSemaphorePermit = self
@@ -260,5 +379,11 @@ impl GameProvider for LichessClient {
 
 #[derive(Debug, Deserialize)]
 struct LichessGame {
+    winner: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LichessGameStatus {
+    id: String,
     winner: Option<String>,
 }

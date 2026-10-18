@@ -125,6 +125,12 @@ async fn main() -> Result<()> {
         })
     };
 
+    // ── Materialized match state ──────────────────────────────────────────
+    // The `matches` table is kept current incrementally by the event poller
+    // (see `rpc::event_poller`), which upserts the latest known state for a
+    // match immediately after each idempotent event insert.  `/matches/:id`
+    // is served directly from this table instead of replaying every event.
+
     info!(
         "Event Indexer running on {}:{}",
         config.bind_addr, config.bind_port

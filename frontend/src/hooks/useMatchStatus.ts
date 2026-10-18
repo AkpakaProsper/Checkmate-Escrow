@@ -199,7 +199,8 @@ export function useMatchStatus(
       }, interval);
     }
 
-    // Cleanup function
+    // Cleanup function: always clear the polling interval so no timer
+    // survives unmount or a dependency change.
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
@@ -213,7 +214,8 @@ export function useMatchStatus(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matchId, interval, enabled, fetchMatch, shouldStopPolling]);
 
-  // Cleanup on unmount
+  // Track mount status so in-flight fetchMatch promises cannot setState
+  // after unmount, and clear any dangling interval on unmount.
   useEffect(() => {
     isMountedRef.current = true;
 

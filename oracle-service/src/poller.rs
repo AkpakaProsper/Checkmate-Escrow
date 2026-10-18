@@ -214,16 +214,7 @@ impl Poller {
         }
         info!(count = due.len(), "poller tick: processing due entries");
 
-        for entry in due {
-            let match_id = entry.match_id;
-            let span = info_span!(
-                "oracle.verify",
-                match_id = match_id,
-                game_id = %entry.game_id,
-                platform = %entry.platform,
-            );
-            self.process_entry(entry).instrument(span).await;
-        }
+        self.process_due_batched(due).await;
         Ok(())
     }
 
@@ -276,9 +267,7 @@ impl Poller {
             .filter(|e| e.platform == Platform::ChessDotCom)
             .collect::<Vec<_>>();
         let count = due.len();
-        for entry in due {
-            self.process_entry(entry).await;
-        }
+        self.process_due_batched(due).await;
         Ok(count)
     }
 
@@ -458,6 +447,216 @@ impl Poller {
     }
 
     // ── private ───────────────────────────────────────────────────────────────
+
+    /// Process a batch of due entries, grouping them by platform so that each
+    /// platform's batch game-status endpoint is called at most once per tick.
+    ///
+    /// Entries whose game IDs fail pre-validation, or that hit the result
+    /// cache, are handled individually and never sent to the batch endpoint.
+    /// If a batch call reports rate limiting, the affected entries are
+    /// rescheduled for retry and the remaining platform groups are skipped for
+    /// this cycle (back-pressure).
+    async fn process_due_batched(&self, due: Vec<PendingEntry>) {
+        let mut lichess: Vec<PendingEntry> = Vec::new();
+        let mut chess_com: Vec<PendingEntry> = Vec::new();
+
+        for entry in due {
+            let match_id = entry.match_id;
+            let game_id = entry.game_id.clone();
+
+            // ── Pre-validation: check game_id format before calling the API ──
+            if let Err(reason) = validate_game_id(entry.platform, &game_id) {
+                warn!(
+                    match_id,
+                    game_id = %game_id,
+                    platform = %entry.platform,
+                    %reason,
+                    "game_id failed pre-validation; dead-lettering without API call",
+                );
+                let mut entry = entry;
+                entry.last_error = Some(reason);
+                entry.attempts = self.inner.max_retries;
+                self.exhaust_entry(entry).await;
+                continue;
+            }
+
+            // ── Cache check ──────────────────────────────────────────────────
+            if let Some(cached_winner) = self.inner.result_cache.get(entry.platform, &game_id).await
+            {
+                info!(
+                    match_id,
+                    game_id = %game_id,
+                    "cache hit — skipping API call, using cached result",
+                );
+                self.submit_and_complete(entry, cached_winner).await;
+                continue;
+            }
+
+            match entry.platform {
+                Platform::Lichess => lichess.push(entry),
+                Platform::ChessDotCom => chess_com.push(entry),
+            }
+        }
+
+        if !lichess.is_empty() {
+            if self.process_lichess_batch(lichess).await {
+                // Rate limited: apply back-pressure by skipping the rest of
+                // this cycle.
+                warn!("lichess batch rate limited; skipping remaining platform groups this cycle");
+                return;
+            }
+        }
+
+        if !chess_com.is_empty() {
+            if self.process_chess_com_batch(chess_com).await {
+                warn!(
+                    "chess.com batch rate limited; skipping remaining platform groups this cycle"
+                );
+            }
+        }
+    }
+
+    /// Fetch results for a group of Lichess entries using the batch endpoint.
+    ///
+    /// Returns `true` if the batch call was rate limited (back-pressure
+    /// signal), `false` otherwise.
+    async fn process_lichess_batch(&self, entries: Vec<PendingEntry>) -> bool {
+        let game_ids: Vec<String> = entries.iter().map(|e| e.game_id.clone()).collect();
+        let results = match self.inner.lichess.fetch_results_batch(&game_ids).await {
+            Ok(r) => r,
+            Err(LichessError::RateLimited { .. }) => {
+                for entry in entries {
+                    self.handle_transient(entry, "batch rate limited".to_string())
+                        .await;
+                }
+                return true;
+            }
+            Err(e) => {
+                let reason = classify_lichess_error(e).into_reason();
+                for entry in entries {
+                    self.handle_fetch_error(entry, reason.clone()).await;
+                }
+                return false;
+            }
+        };
+
+        for entry in entries {
+            let match_id = entry.match_id;
+            let span = info_span!(
+                "oracle.verify",
+                match_id = match_id,
+                game_id = %entry.game_id,
+                platform = %entry.platform,
+            );
+            let outcome = results.get(&entry.game_id).cloned();
+            async {
+                match outcome {
+                    Some(Ok(winner)) => self.complete_with_winner(entry, winner).await,
+                    Some(Err(e)) => {
+                        let reason = classify_lichess_error(e).into_reason();
+                        self.handle_fetch_error(entry, reason).await;
+                    }
+                    None => {
+                        self.handle_transient(
+                            entry,
+                            "game missing from batch response".to_string(),
+                        )
+                        .await;
+                    }
+                }
+            }
+            .instrument(span)
+            .await;
+        }
+        false
+    }
+
+    /// Fetch results for a group of Chess.com entries using the batch endpoint.
+    ///
+    /// Returns `true` if the batch call was rate limited (back-pressure
+    /// signal), `false` otherwise.
+    async fn process_chess_com_batch(&self, entries: Vec<PendingEntry>) -> bool {
+        let game_ids: Vec<String> = entries.iter().map(|e| e.game_id.clone()).collect();
+        let results = match self.inner.chess_com.fetch_results_batch(&game_ids).await {
+            Ok(r) => r,
+            Err(ChessComError::RateLimited { .. }) => {
+                for entry in entries {
+                    self.handle_transient(entry, "batch rate limited".to_string())
+                        .await;
+                }
+                return true;
+            }
+            Err(e) => {
+                let reason = classify_chess_com_error(e).into_reason();
+                for entry in entries {
+                    self.handle_fetch_error(entry, reason.clone()).await;
+                }
+                return false;
+            }
+        };
+
+        for entry in entries {
+            let match_id = entry.match_id;
+            let span = info_span!(
+                "oracle.verify",
+                match_id = match_id,
+                game_id = %entry.game_id,
+                platform = %entry.platform,
+            );
+            let outcome = results.get(&entry.game_id).cloned();
+            async {
+                match outcome {
+                    Some(Ok(winner)) => self.complete_with_winner(entry, winner).await,
+                    Some(Err(e)) => {
+                        let reason = classify_chess_com_error(e).into_reason();
+                        self.handle_fetch_error(entry, reason).await;
+                    }
+                    None => {
+                        self.handle_transient(
+                            entry,
+                            "game missing from batch response".to_string(),
+                        )
+                        .await;
+                    }
+                }
+            }
+            .instrument(span)
+            .await;
+        }
+        false
+    }
+
+    /// Cache and submit a successfully-fetched winner.
+    async fn complete_with_winner(&self, entry: PendingEntry, winner: Winner) {
+        let match_id = entry.match_id;
+        info!(
+            match_id,
+            ?winner,
+            "result fetched; caching and submitting to Soroban"
+        );
+        self.inner
+            .result_cache
+            .insert(entry.platform, &entry.game_id, winner.clone())
+            .await;
+        self.submit_and_complete(entry, winner).await;
+    }
+
+    /// Apply a classified fetch error to a single entry, preserving the
+    /// permanent/transient distinction.
+    async fn handle_fetch_error(&self, mut entry: PendingEntry, reason: String) {
+        let match_id = entry.match_id;
+        // Permanent errors are dead-lettered immediately; transient errors are
+        // rescheduled with backoff.
+        if is_permanent_reason(&reason) {
+            warn!(match_id, %reason, "permanent fetch error; dead-lettering immediately");
+            entry.last_error = Some(reason);
+            entry.attempts = self.inner.max_retries;
+            self.exhaust_entry(entry).await;
+        } else {
+            warn!(match_id, %reason, "transient fetch error; scheduling retry");
+            self.handle_transient(entry, reason).await;
+        }
+    }
 
     async fn process_entry(&self, mut entry: PendingEntry) {
         let match_id = entry.match_id;
@@ -640,10 +839,29 @@ enum FetchError {
     Transient(String),
 }
 
+impl FetchError {
+    /// Consume the error and return its human-readable reason string.
+    fn into_reason(self) -> String {
+        match self {
+            FetchError::Permanent(s) | FetchError::Transient(s) => s,
+        }
+    }
+}
+
+/// Returns `true` when `reason` was produced by a permanent fetch error.
+///
+/// Permanent errors are prefixed by [`classify_lichess_error`] /
+/// [`classify_chess_com_error`] via [`FetchError::into_reason`]; this helper
+/// lets the batch path recover the permanent/transient distinction from the
+/// already-classified reason string.
+fn is_permanent_reason(reason: &str) -> bool {
+    reason.starts_with("permanent:")
+}
+
 fn classify_lichess_error(e: LichessError) -> FetchError {
     match e {
-        LichessError::InvalidGameId => FetchError::Permanent(e.to_string()),
-        LichessError::GameNotFound => FetchError::Permanent(e.to_string()),
+        LichessError::InvalidGameId => FetchError::Permanent(format!("permanent: {}", e)),
+        LichessError::GameNotFound => FetchError::Permanent(format!("permanent: {}", e)),
         LichessError::GameNotFinished
         | LichessError::Http(_)
         | LichessError::Timeout
@@ -656,8 +874,8 @@ fn classify_lichess_error(e: LichessError) -> FetchError {
 
 fn classify_chess_com_error(e: ChessComError) -> FetchError {
     match e {
-        ChessComError::InvalidGameId => FetchError::Permanent(e.to_string()),
-        ChessComError::GameNotFound => FetchError::Permanent(e.to_string()),
+        ChessComError::InvalidGameId => FetchError::Permanent(format!("permanent: {}", e)),
+        ChessComError::GameNotFound => FetchError::Permanent(format!("permanent: {}", e)),
         ChessComError::GameNotFinished
         | ChessComError::Http(_)
         | ChessComError::Timeout
@@ -810,5 +1028,19 @@ mod validate_game_id_tests {
     fn chess_com_oversized_rejected() {
         let id: String = "1".repeat(65);
         assert!(validate_game_id(Platform::ChessDotCom, &id).is_err());
+    }
+
+    // ── Batch error classification ────────────────────────────────────────────
+
+    #[test]
+    fn permanent_reason_detected() {
+        let reason = classify_lichess_error(LichessError::GameNotFound).into_reason();
+        assert!(is_permanent_reason(&reason));
+    }
+
+    #[test]
+    fn transient_reason_not_permanent() {
+        let reason = classify_chess_com_error(ChessComError::GameNotFinished).into_reason();
+        assert!(!is_permanent_reason(&reason));
     }
 }

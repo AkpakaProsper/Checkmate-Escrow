@@ -61,6 +61,52 @@ pub struct MatchInfo {
     pub events: Vec<IndexedEvent>,
 }
 
+/// A row of the materialized `matches` table.
+///
+/// This stores the latest known state for each match so that
+/// `GET /matches/:id` can be served without replaying every event.
+/// The `events` field of `MatchInfo` is populated separately (or left
+/// empty) when serving from this table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MatchStateRow {
+    pub match_id: u64,
+    pub player1: String,
+    pub player2: String,
+    pub status: MatchStatus,
+    pub winner: Option<Winner>,
+    pub stake_amount: String,
+    pub token: String,
+    pub game_id: String,
+    pub platform: String,
+    pub created_ledger: u32,
+    pub completed_ledger: Option<u32>,
+    /// Ledger sequence of the most recently applied event for this match.
+    pub last_ledger_sequence: u32,
+    /// Timestamp of the most recently applied event for this match.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl MatchStateRow {
+    /// Convert this materialized row into a `MatchInfo`, attaching the
+    /// supplied events (which may be empty when serving from the table).
+    pub fn into_match_info(self, events: Vec<IndexedEvent>) -> MatchInfo {
+        MatchInfo {
+            match_id: self.match_id,
+            player1: self.player1,
+            player2: self.player2,
+            status: self.status,
+            winner: self.winner,
+            stake_amount: self.stake_amount,
+            token: self.token,
+            game_id: self.game_id,
+            platform: self.platform,
+            created_ledger: self.created_ledger,
+            completed_ledger: self.completed_ledger,
+            events,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryFilters {
     pub player_address: Option<String>,

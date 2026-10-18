@@ -321,6 +321,70 @@ describe('useMatchStatus', () => {
       expect(result.current.loading).toBe(true);
       expect(result.current.match).toBe(null);
     });
+
+    it('should not poll after unmount when timers are advanced', async () => {
+      const mockMatch = createMockMatch({ state: MatchState.Active });
+      const getMatchFn = vi.fn().mockResolvedValue(mockMatch);
+
+      const { unmount } = renderHook(() =>
+        useMatchStatus(1, getMatchFn, { interval: 5000 })
+      );
+
+      await waitFor(() => {
+        expect(getMatchFn).toHaveBeenCalledTimes(1);
+      });
+
+      unmount();
+
+      // Advance timers well past several intervals - no further calls expected
+      act(() => {
+        vi.advanceTimersByTime(50000);
+      });
+
+      expect(getMatchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not update loading, match, or error when a pending fetch resolves after unmount', async () => {
+      const mockMatch = createMockMatch({ state: MatchState.Active });
+      let resolveMatch: (value: Match) => void;
+      const getMatchFn = vi.fn(
+        () =>
+          new Promise<Match>((resolve) => {
+            resolveMatch = resolve;
+          })
+      );
+
+      const { result, unmount } = renderHook(() =>
+        useMatchStatus(1, getMatchFn, { interval: 5000 })
+      );
+
+      // Capture pre-unmount values
+      const preUnmountLoading = result.current.loading;
+      const preUnmountMatch = result.current.match;
+      const preUnmountError = result.current.error;
+
+      expect(preUnmountLoading).toBe(true);
+      expect(preUnmountMatch).toBe(null);
+      expect(preUnmountError).toBe(null);
+
+      unmount();
+
+      // Resolve the pending fetch after unmount
+      await act(async () => {
+        resolveMatch!(mockMatch);
+      });
+
+      // Advance timers to ensure no polling or state updates occur
+      act(() => {
+        vi.advanceTimersByTime(20000);
+      });
+
+      // State must remain at pre-unmount values
+      expect(result.current.loading).toBe(preUnmountLoading);
+      expect(result.current.match).toBe(preUnmountMatch);
+      expect(result.current.error).toBe(preUnmountError);
+      expect(getMatchFn).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('matchId changes', () => {
