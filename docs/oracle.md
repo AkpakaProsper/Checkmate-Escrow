@@ -304,6 +304,14 @@ The threshold defaults to **1** if never set — the degenerate single-oracle
 configuration described in [Migration path](#migration-path-from-single-oracle).
 `get_consensus_threshold()` reads the current value.
 
+> **Warning:** the threshold must be reachable — `m` must not exceed the number
+> of registered oracles (`get_registered_oracle_count()`), or no match can ever
+> reach consensus and every match deadlocks. `set_consensus_threshold` still
+> stores an unreachable value (so the threshold can be configured before
+> oracles register), but emits an `("oracle", "thr_warn")` event carrying
+> `(threshold, registered_oracle_count)`. Register enough oracles before
+> matches are submitted.
+
 ### Submitting a vote
 
 ```rust

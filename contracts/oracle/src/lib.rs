@@ -1158,6 +1158,15 @@ impl OracleContract {
     /// result before `submit_oracle_result` finalizes a match. Pass `1` to
     /// restore the degenerate single-oracle configuration.
     ///
+    /// # Warning
+    /// The threshold must be reachable: it must not exceed the number of
+    /// registered oracles (see [`get_registered_oracle_count`]), otherwise no
+    /// match can ever reach consensus and every match deadlocks. The value is
+    /// still stored so the threshold can be configured before oracles are
+    /// registered, but an `("oracle", "thr_warn")` event carrying
+    /// `(threshold, registered_oracle_count)` is emitted whenever it exceeds
+    /// the current count. Register enough oracles before matches are submitted.
+    ///
     /// # Errors
     /// - [`Error::Unauthorized`] — contract has not been initialized or caller is not the admin.
     /// - [`Error::InvalidThreshold`] — `threshold` is 0.
@@ -1181,6 +1190,14 @@ impl OracleContract {
             (Symbol::new(&env, "oracle"), symbol_short!("thresh")),
             threshold,
         );
+
+        let registered = Self::get_registered_oracle_count(env.clone());
+        if threshold > registered {
+            env.events().publish(
+                (Symbol::new(&env, "oracle"), symbol_short!("thr_warn")),
+                (threshold, registered),
+            );
+        }
         Ok(())
     }
 
