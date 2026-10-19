@@ -2586,6 +2586,51 @@ fn test_set_consensus_threshold_rejects_zero() {
     assert_eq!(result, Err(Ok(Error::InvalidThreshold)));
 }
 
+fn thr_warn_events(env: &Env) -> std::vec::Vec<(u32, u32)> {
+    let expected_topics = soroban_sdk::vec![
+        env,
+        Symbol::new(env, "oracle").into_val(env),
+        symbol_short!("thr_warn").into_val(env),
+    ];
+    env.events()
+        .all()
+        .iter()
+        .filter(|(_, topics, _)| *topics == expected_topics)
+        .map(|(_, _, data)| {
+            let v: (u32, u32) = soroban_sdk::TryFromVal::try_from_val(env, &data).unwrap();
+            v
+        })
+        .collect()
+}
+
+#[test]
+fn test_set_consensus_threshold_above_registered_count_warns_but_stores() {
+    let (env, contract_id, _escrow_id, _admin, _p1, _p2, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    register_n_oracles(&env, &client, &token_addr, 2, 100);
+
+    client.set_consensus_threshold(&3);
+
+    // Soft validation: a warning event carrying (threshold, registered_count)
+    // is emitted...
+    assert_eq!(thr_warn_events(&env), std::vec![(3u32, 2u32)]);
+    // ...but the threshold is still stored so pre-registration setup flows
+    // keep working.
+    assert_eq!(client.get_consensus_threshold(), 3);
+}
+
+#[test]
+fn test_set_consensus_threshold_within_registered_count_does_not_warn() {
+    let (env, contract_id, _escrow_id, _admin, _p1, _p2, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    register_n_oracles(&env, &client, &token_addr, 2, 100);
+
+    client.set_consensus_threshold(&2);
+
+    assert!(thr_warn_events(&env).is_empty());
+    assert_eq!(client.get_consensus_threshold(), 2);
+}
+
 #[test]
 #[should_panic]
 fn test_set_consensus_threshold_requires_admin_auth() {
