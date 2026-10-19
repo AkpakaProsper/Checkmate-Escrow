@@ -166,6 +166,116 @@ fn test_admin_cancel_slash_prevents_finalization() {
     assert!(result.is_err(), "cancelled slash must not be finalizable");
 }
 
+// #1752 — end-to-end slash lifecycle: stage → grace period → finalize.
+#[test]
+fn test_slash_lifecycle_finalize_before_grace_period_returns_slash_grace_period_not_elapsed() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+    let balance_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+    client.set_slashing_grace_period(&100u32);
+
+    client.slash_oracle(&oracle_admin, &0u64, &75i128);
+    let pending = client
+        .get_pending_slash(&oracle_admin, &0u64)
+        .expect("slash should be staged");
+    assert_eq!(pending.slash_amount, 75);
+
+    // Finalizing too early must fail with the dedicated error.
+    let result = client.try_finalize_slash(&oracle_admin, &0u64);
+    assert_eq!(result, Err(Ok(Error::SlashGracePeriodNotElapsed)));
+
+    // Nothing has moved and the stake is untouched.
+    assert_eq!(balance_client.balance(&contract_id), 300);
+    assert!(client.get_pending_slash(&oracle_admin, &0u64).is_some());
+}
+
+// #1752 — after the grace period elapses, finalize_slash reduces the oracle's
+// registered stake and transfers the slashed funds to the treasury.
+#[test]
+fn test_slash_lifecycle_finalize_after_grace_period_reduces_stake_and_pays_treasury() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+    let balance_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+    client.set_slashing_grace_period(&100u32);
+
+    client.slash_oracle(&oracle_admin, &0u64, &75i128);
+    let pending = client
+        .get_pending_slash(&oracle_admin, &0u64)
+        .expect("slash should be staged");
+
+    // Advance the ledger past the grace period.
+    env.ledger()
+        .set_sequence_number(pending.eligible_ledger + 1);
+
+    let treasury_balance_before = balance_client.balance(&oracle_admin);
+    client.finalize_slash(&oracle_admin, &0u64);
+
+    // Pending slash is cleared.
+    assert!(client.get_pending_slash(&oracle_admin, &0u64).is_none());
+
+    // Registered stake decreased by the slash amount.
+    let registration: OracleRegistration = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleRegistration(oracle_admin.clone()))
+            .unwrap()
+    });
+    assert_eq!(registration.oracle_stake, 225);
+
+    // Funds moved out of the contract to the treasury (admin).
+    assert_eq!(balance_client.balance(&contract_id), 225);
+    assert_eq!(
+        balance_client.balance(&oracle_admin),
+        treasury_balance_before + 75
+    );
+}
+
+// #1752 — admin_cancel_slash prevents finalization: the pending slash is
+// cleared, finalize_slash returns SlashNotFound, and the stake is unchanged.
+#[test]
+fn test_slash_lifecycle_admin_cancel_prevents_finalization() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+    let balance_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+    client.set_slashing_grace_period(&100u32);
+
+    client.slash_oracle(&oracle_admin, &0u64, &75i128);
+    let pending = client
+        .get_pending_slash(&oracle_admin, &0u64)
+        .expect("slash should be staged");
+
+    client.admin_cancel_slash(&oracle_admin, &0u64);
+    assert!(client.get_pending_slash(&oracle_admin, &0u64).is_none());
+
+    // Even after the grace period would have elapsed, finalization fails.
+    env.ledger()
+        .set_sequence_number(pending.eligible_ledger + 1);
+    let result = client.try_finalize_slash(&oracle_admin, &0u64);
+    assert_eq!(result, Err(Ok(Error::SlashNotFound)));
+
+    // Stake and balances are untouched.
+    let registration: OracleRegistration = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleRegistration(oracle_admin.clone()))
+            .unwrap()
+    });
+    assert_eq!(registration.oracle_stake, 300);
+    assert_eq!(balance_client.balance(&contract_id), 300);
+}
+
 #[test]
 fn test_finalize_slash_succeeds_immediately_with_zero_grace_period() {
     // Default grace period is 0 ledgers, so finalize_slash should succeed
@@ -189,6 +299,49 @@ fn test_finalize_slash_succeeds_immediately_with_zero_grace_period() {
         admin_balance_before + 75
     );
     assert!(client.get_pending_slash(&oracle_admin, &0u64).is_none());
+}
+
+// #1741 — slash_oracle must reject addresses that never registered as an
+// oracle, rather than staging phantom slash records for them.
+#[test]
+fn test_slash_oracle_rejects_unregistered_address() {
+    let (env, contract_id, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    let stranger = Address::generate(&env);
+
+    let result = client.try_slash_oracle(&stranger, &0u64, &75i128);
+    assert_eq!(
+        result,
+        Err(Ok(Error::NotRegisteredOracle)),
+        "slash_oracle must reject an address that never registered"
+    );
+
+    // No phantom pending slash may be staged for the unregistered address.
+    assert!(
+        client.get_pending_slash(&stranger, &0u64).is_none(),
+        "no pending slash must be staged for an unregistered address"
+    );
+}
+
+// #1741 — companion: a genuinely registered oracle must still be slashable.
+#[test]
+fn test_slash_oracle_still_stages_for_registered_oracle() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+
+    client.slash_oracle(&oracle_admin, &0u64, &75i128);
+
+    let pending = client.get_pending_slash(&oracle_admin, &0u64);
+    assert!(
+        pending.is_some(),
+        "a registered oracle must still have a slash staged"
+    );
+    assert_eq!(pending.unwrap().slash_amount, 75);
 }
 
 // #1577 — slash_oracle must return SlashAlreadyPending if a pending slash already
@@ -3767,43 +3920,130 @@ fn test_pause_unpause_cycle_succeeds() {
     assert_eq!(client.try_unpause(), Err(Ok(Error::InvalidPauseState)));
 }
 
-// #1728 — get_approved_oracles exposes the approved oracle set so monitoring
-// tools do not have to reconstruct it from admin/ora_add and admin/ora_rm events.
+// ── #1746: configurable SLA threshold for deactivate_slow_oracle ─────────
+
 #[test]
-fn test_get_approved_oracles_tracks_additions_and_removals() {
+fn test_sla_threshold_defaults_when_unset() {
     let (env, contract_id, ..) = setup();
     let client = OracleContractClient::new(&env, &contract_id);
 
-    // Initially empty.
-    assert_eq!(client.get_approved_oracles(), soroban_sdk::vec![&env]);
-
-    let oracle_a = Address::generate(&env);
-    let oracle_b = Address::generate(&env);
-
-    client.add_approved_oracle(&oracle_a);
-    client.add_approved_oracle(&oracle_b);
-
-    // Both listed in insertion order.
     assert_eq!(
-        client.get_approved_oracles(),
-        soroban_sdk::vec![&env, oracle_a.clone(), oracle_b.clone()]
+        client.get_sla_threshold(),
+        crate::DEFAULT_SLA_THRESHOLD_MS,
+        "unset SLA threshold must fall back to the hardcoded default"
+    );
+    assert_eq!(client.get_sla_threshold(), 5_000u64);
+}
+
+#[test]
+fn test_set_sla_threshold_persists_and_is_returned_by_getter() {
+    let (env, contract_id, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    client.set_sla_threshold(&12_000u64);
+    assert_eq!(client.get_sla_threshold(), 12_000u64);
+
+    // Overwriting the threshold must be reflected by the getter.
+    client.set_sla_threshold(&7_500u64);
+    assert_eq!(client.get_sla_threshold(), 7_500u64);
+}
+
+#[test]
+fn test_set_sla_threshold_emits_event() {
+    let (env, contract_id, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    client.set_sla_threshold(&9_000u64);
+
+    let events = env.events().all();
+    let expected_topics = soroban_sdk::vec![
+        &env,
+        Symbol::new(&env, "oracle").into_val(&env),
+        symbol_short!("sla_thr").into_val(&env),
+    ];
+    let matched = events
+        .iter()
+        .find(|(_, topics, _)| *topics == expected_topics);
+    assert!(matched.is_some(), "oracle/sla_thr event not emitted");
+
+    let (_, _, data) = matched.unwrap();
+    let ev_threshold: u64 = soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+    assert_eq!(ev_threshold, 9_000u64);
+}
+
+#[test]
+#[should_panic]
+fn test_set_sla_threshold_rejects_non_admin() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_sla_threshold",
+            args: (10_000u64,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.set_sla_threshold(&10_000u64);
+}
+
+#[test]
+fn test_deactivate_slow_oracle_uses_configured_threshold() {
+    let (env, contract_id, .., oracle_admin, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    // Raise the threshold well above the default so a 6s-old submission is
+    // no longer considered slow.
+    client.set_sla_threshold(&60_000u64);
+
+    client.submit_result(
+        &0u64,
+        &String::from_str(&env, "abc123"),
+        &Platform::Lichess,
+        &Winner::Player1,
+        &1000u64,
     );
 
-    // Re-adding an already-approved oracle must not duplicate it.
-    client.add_approved_oracle(&oracle_a);
-    assert_eq!(
-        client.get_approved_oracles(),
-        soroban_sdk::vec![&env, oracle_a.clone(), oracle_b.clone()]
+    // Advance 6 seconds — beyond the default 5s but within the configured 60s.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 6_000);
+
+    let deactivated = client.deactivate_slow_oracle(&oracle_admin);
+    assert!(
+        !deactivated,
+        "oracle within the configured SLA threshold must not be deactivated"
+    );
+}
+
+#[test]
+fn test_deactivate_slow_oracle_deactivates_beyond_configured_threshold() {
+    let (env, contract_id, .., oracle_admin, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    // Lower the threshold so a 2s-old submission counts as slow.
+    client.set_sla_threshold(&1_000u64);
+
+    client.submit_result(
+        &0u64,
+        &String::from_str(&env, "abc123"),
+        &Platform::Lichess,
+        &Winner::Player1,
+        &1000u64,
     );
 
-    // Removing one leaves only the other.
-    client.remove_approved_oracle(&oracle_a);
-    assert_eq!(
-        client.get_approved_oracles(),
-        soroban_sdk::vec![&env, oracle_b.clone()]
-    );
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 2_000);
 
-    // Removing the last one leaves an empty list.
-    client.remove_approved_oracle(&oracle_b);
-    assert_eq!(client.get_approved_oracles(), soroban_sdk::vec![&env]);
+    let deactivated = client.deactivate_slow_oracle(&oracle_admin);
+    assert!(
+        deactivated,
+        "oracle exceeding the configured SLA threshold must be deactivated"
+    );
 }

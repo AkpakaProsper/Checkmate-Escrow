@@ -854,6 +854,131 @@ fn test_two_step_admin_transfer() {
     );
 }
 
+// #1733 — full two-step admin transfer: propose → accept
+#[test]
+fn test_admin_transfer_propose_then_accept() {
+    let (env, contract_id, _oracle, _player1, _player2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&new_admin);
+    assert_eq!(
+        client.get_admin(),
+        admin,
+        "admin must not change on propose"
+    );
+    let pending: Option<PendingAdminProposal> = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    });
+    assert!(
+        pending.is_some(),
+        "PendingAdmin must be stored after propose"
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.accept_admin();
+
+    assert_eq!(
+        client.get_admin(),
+        new_admin,
+        "admin must be new_admin after accept"
+    );
+    let pending: Option<PendingAdminProposal> = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    });
+    assert!(
+        pending.is_none(),
+        "PendingAdmin must be cleared after accept"
+    );
+}
+
+// #1733 — cancel_admin_proposal prevents the pending admin from accepting
+#[test]
+fn test_admin_transfer_cancel_blocks_accept() {
+    let (env, contract_id, _oracle, _player1, _player2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&new_admin);
+    client.cancel_admin_proposal();
+
+    assert_eq!(
+        client.get_admin(),
+        admin,
+        "admin must remain unchanged after cancel"
+    );
+    let pending: Option<PendingAdminProposal> = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    });
+    assert!(
+        pending.is_none(),
+        "PendingAdmin must be cleared after cancel"
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_accept_admin();
+    assert_eq!(
+        result,
+        Err(Ok(Error::Unauthorized)),
+        "cancelled pending admin must not be able to accept"
+    );
+    assert_eq!(
+        client.get_admin(),
+        admin,
+        "admin must remain unchanged after failed accept"
+    );
+}
+
+// #1733 — a non-pending admin cannot call accept_admin
+#[test]
+fn test_accept_admin_rejects_non_pending_admin() {
+    let (env, contract_id, _oracle, _player1, _player2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let pending_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.propose_admin(&pending_admin);
+
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_accept_admin();
+    assert!(
+        result.is_err(),
+        "non-pending admin must not be able to accept"
+    );
+    assert_eq!(
+        client.get_admin(),
+        admin,
+        "admin must remain unchanged after rejected accept"
+    );
+}
+
 // #1101 — pause blocks create_match and unpause restores it
 #[test]
 fn test_pause_blocks_create_match() {
@@ -887,6 +1012,34 @@ fn test_pause_blocks_create_match() {
         &Platform::Lichess,
     );
     assert_eq!(id, 0, "create_match must succeed after unpause");
+}
+
+// #1759 — propose_admin must reject the current admin as the pending admin
+#[test]
+fn test_propose_admin_rejects_current_admin() {
+    let (env, contract_id, _oracle, _player1, _player2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_propose_admin(&admin);
+    assert_eq!(result, Err(Ok(Error::InvalidAddress)));
+
+    let pending: Option<PendingAdminProposal> = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    });
+    assert!(
+        pending.is_none(),
+        "PendingAdmin must not be written when proposing the current admin"
+    );
+}
+
+// #1755 — get_contract_version returns the crate version from Cargo.toml
+#[test]
+fn test_get_contract_version_matches_cargo_pkg_version() {
+    let (env, contract_id, ..) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let version = client.get_contract_version();
+    assert_eq!(version.to_string(), env!("CARGO_PKG_VERSION"));
 }
 
 // #1162 — get_contract_version returns the crate's semver string
