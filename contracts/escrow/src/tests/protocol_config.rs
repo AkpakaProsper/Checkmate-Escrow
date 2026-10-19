@@ -10,17 +10,23 @@ use super::*;
 /// Build a non-default `ProtocolConfig` for assertion purposes.
 fn custom_config(env: &Env, treasury: &Address) -> ProtocolConfig {
     ProtocolConfig {
-        vesting_duration_seconds: 86_400,
-        cancellation_fee_basis_points: 50,
+        fee: FeeConfig {
+            protocol_fee_bps: 100,
+            fee_recipient: treasury.clone(),
+            cancellation_fee_basis_points: 50,
+            max_protocol_fee: None,
+        },
+        timeout: TimeoutConfig {
+            match_timeout_seconds: 604_800, // 7 days
+            vesting_duration_seconds: 86_400,
+        },
+        stake: StakeConfig {
+            minimum_stake: DEFAULT_MINIMUM_STAKE,
+            maximum_stake: Some(5_000),
+            stablecoin_only_mode: false,
+        },
         treasury: treasury.clone(),
-        stablecoin_only_mode: false,
-        maximum_stake: Some(5_000),
-        match_timeout_seconds: 604_800, // 7 days
-        protocol_fee_bps: 100,
-        fee_recipient: treasury.clone(),
-        minimum_stake: DEFAULT_MINIMUM_STAKE,
-                max_protocol_fee: None,
-                dispute_bond_tier_schedule: soroban_sdk::vec![env],
+        dispute_bond_tier_schedule: soroban_sdk::vec![env],
     }
 }
 
@@ -36,17 +42,23 @@ fn test_get_protocol_config_returns_config_set_during_initialize() {
 
     // The `setup()` fixture stores this exact config via `set_protocol_config`.
     let expected = ProtocolConfig {
-        vesting_duration_seconds: 0,
-        cancellation_fee_basis_points: 0,
+        fee: FeeConfig {
+            protocol_fee_bps: 0,
+            fee_recipient: admin.clone(),
+            cancellation_fee_basis_points: 0,
+            max_protocol_fee: None,
+        },
+        timeout: TimeoutConfig {
+            match_timeout_seconds: DEFAULT_MATCH_TIMEOUT_SECONDS,
+            vesting_duration_seconds: 0,
+        },
+        stake: StakeConfig {
+            minimum_stake: DEFAULT_MINIMUM_STAKE,
+            maximum_stake: None,
+            stablecoin_only_mode: false,
+        },
         treasury: admin.clone(),
-        stablecoin_only_mode: false,
-        maximum_stake: None,
-        match_timeout_seconds: DEFAULT_MATCH_TIMEOUT_SECONDS,
-        protocol_fee_bps: 0,
-        fee_recipient: admin.clone(),
-        minimum_stake: DEFAULT_MINIMUM_STAKE,
-                max_protocol_fee: None,
-                dispute_bond_tier_schedule: soroban_sdk::vec![&env],
+        dispute_bond_tier_schedule: soroban_sdk::vec![&env],
     };
 
     let actual = client.get_protocol_config();
@@ -62,17 +74,23 @@ fn test_get_protocol_config_reflects_update_after_set() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let updated = ProtocolConfig {
-        vesting_duration_seconds: 3_600,
-        cancellation_fee_basis_points: 25,
+        fee: FeeConfig {
+            protocol_fee_bps: 200,
+            fee_recipient: admin.clone(),
+            cancellation_fee_basis_points: 25,
+            max_protocol_fee: None,
+        },
+        timeout: TimeoutConfig {
+            match_timeout_seconds: 172_800, // 2 days
+            vesting_duration_seconds: 3_600,
+        },
+        stake: StakeConfig {
+            minimum_stake: DEFAULT_MINIMUM_STAKE,
+            maximum_stake: Some(10_000),
+            stablecoin_only_mode: false,
+        },
         treasury: admin.clone(),
-        stablecoin_only_mode: false,
-        maximum_stake: Some(10_000),
-        match_timeout_seconds: 172_800, // 2 days
-        protocol_fee_bps: 200,
-        fee_recipient: admin.clone(),
-        minimum_stake: DEFAULT_MINIMUM_STAKE,
-                max_protocol_fee: None,
-                dispute_bond_tier_schedule: soroban_sdk::vec![&env],
+        dispute_bond_tier_schedule: soroban_sdk::vec![&env],
     };
 
     client.set_protocol_config(&updated);
@@ -152,7 +170,7 @@ fn test_set_protocol_config_rejects_self_referential_fee_recipient() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let mut cfg = custom_config(&env, &admin);
-    cfg.fee_recipient = contract_id.clone();
+    cfg.fee.fee_recipient = contract_id.clone();
 
     let result = client.try_set_protocol_config(&cfg);
     assert!(
@@ -178,4 +196,64 @@ fn test_set_protocol_config_rejected_for_non_admin() {
         result.is_err(),
         "non-admin must not be able to set ProtocolConfig"
     );
+}
+
+/// `set_protocol_config` must reject a `cancellation_fee_basis_points` above
+/// 10_000 (more than 100% of the stake) with `Error::InvalidAmount`, and the
+/// previously stored config must remain unchanged.
+#[test]
+fn test_set_protocol_config_rejects_cancellation_fee_above_max() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let cfg_before = client.get_protocol_config();
+
+    let mut cfg = custom_config(&env, &admin);
+    cfg.cancellation_fee_basis_points = 10_001;
+
+    let result = client.try_set_protocol_config(&cfg);
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidAmount)),
+        "cancellation_fee_basis_points > 10_000 must be rejected"
+    );
+
+    let cfg_after = client.get_protocol_config();
+    assert_eq!(
+        cfg_before, cfg_after,
+        "rejected config must not be stored"
+    );
+}
+
+/// `set_protocol_config` must accept `cancellation_fee_basis_points` exactly
+/// at the 10_000 boundary.
+#[test]
+fn test_set_protocol_config_accepts_cancellation_fee_at_max() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let mut cfg = custom_config(&env, &admin);
+    cfg.cancellation_fee_basis_points = 10_000;
+
+    client.set_protocol_config(&cfg);
+
+    let actual = client.get_protocol_config();
+    assert_eq!(actual, cfg);
+}
+
+/// `set_protocol_config` must accept a valid `cancellation_fee_basis_points`
+/// below the bound and `get_protocol_config` must reflect it.
+#[test]
+fn test_set_protocol_config_accepts_valid_cancellation_fee() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let mut cfg = custom_config(&env, &admin);
+    cfg.cancellation_fee_basis_points = 250;
+
+    client.set_protocol_config(&cfg);
+
+    let actual = client.get_protocol_config();
+    assert_eq!(actual.cancellation_fee_basis_points, 250);
+    assert_eq!(actual, cfg);
 }
