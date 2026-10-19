@@ -211,6 +211,7 @@ struct MatchParams {
     referrer: Option<Address>,
     bracket_id: Option<u64>,
     round: Option<u32>,
+    vesting_override_seconds: Option<u64>,
 }
 
 #[contractimpl]
@@ -6839,6 +6840,16 @@ impl EscrowContract {
                     },
                 }
             })
+    }
+
+    /// Resolve the vesting duration (in seconds) that applies to `m`.
+    ///
+    /// A per-match `vesting_override_seconds` agreed at match creation time
+    /// takes precedence over the global `ProtocolConfig::vesting_duration_seconds`
+    /// (issue #1731).
+    fn resolve_vesting_duration(env: &Env, m: &Match) -> u64 {
+        m.vesting_override_seconds
+            .unwrap_or_else(|| Self::get_config(env).vesting_duration_seconds)
     }
 
     /// Compute the referral fee to deduct from a winner's payout.
