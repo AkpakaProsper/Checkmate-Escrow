@@ -4436,6 +4436,10 @@ impl EscrowContract {
             return Err(Error::DisputeAlreadyResolved);
         }
 
+        // The voting window must always be closed before a dispute can be
+        // resolved, regardless of whether quorum has already been reached.
+        // Otherwise a dispute could be resolved while eligible voters still
+        // have time to cast ballots (issue #1753).
         if env.ledger().sequence() < dispute.voting_deadline {
             return Err(Error::VotingPeriodNotElapsed);
         }
@@ -4457,7 +4461,8 @@ impl EscrowContract {
             .get(&DataKey::PendingWinner(match_id))
             .ok_or(Error::PendingResultNotFound)?;
 
-        // Check quorum requirement
+        // Quorum is only evaluated once the voting window has closed (checked
+        // above), so an early quorum can no longer short-circuit the deadline.
         let total_votes = dispute.yes_votes.saturating_add(dispute.no_votes);
         if total_votes < dispute.quorum_threshold {
             return Err(Error::QuorumNotMet);
