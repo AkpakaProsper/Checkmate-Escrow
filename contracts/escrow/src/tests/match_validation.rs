@@ -286,6 +286,183 @@ fn test_tournament_match_requires_organizer_authorization() {
 }
 
 #[test]
+fn test_create_match_below_minimum_stake_rejected() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.set_minimum_stake(&admin, &100);
+
+    let result = client.try_create_match(
+        &player1,
+        &player2,
+        &99,
+        &token,
+        &String::from_str(&env, "b1a2c3d4"),
+        &Platform::Lichess,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidAmount)),
+        "stake below configured minimum must be rejected"
+    );
+}
+
+#[test]
+fn test_create_match_above_maximum_stake_rejected() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.set_maximum_stake(&admin, &500);
+
+    let result = client.try_create_match(
+        &player1,
+        &player2,
+        &501,
+        &token,
+        &String::from_str(&env, "c2b3d4e5"),
+        &Platform::Lichess,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidAmount)),
+        "stake above configured maximum must be rejected"
+    );
+}
+
+#[test]
+fn test_create_match_at_stake_boundaries_accepted() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.set_minimum_stake(&admin, &100);
+    client.set_maximum_stake(&admin, &500);
+
+    let at_minimum = client.try_create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "d3c4e5f6"),
+        &Platform::Lichess,
+    );
+    assert!(
+        at_minimum.is_ok(),
+        "stake exactly at the configured minimum must be accepted"
+    );
+
+    let at_maximum = client.try_create_match(
+        &player1,
+        &player2,
+        &500,
+        &token,
+        &String::from_str(&env, "e4d5f6a7"),
+        &Platform::Lichess,
+    );
+    assert!(
+        at_maximum.is_ok(),
+        "stake exactly at the configured maximum must be accepted"
+    );
+}
+
+#[test]
+fn test_create_match_with_only_minimum_configured() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.set_minimum_stake(&admin, &100);
+
+    let below = client.try_create_match(
+        &player1,
+        &player2,
+        &99,
+        &token,
+        &String::from_str(&env, "f5e6a7b8"),
+        &Platform::Lichess,
+    );
+    assert_eq!(
+        below,
+        Err(Ok(Error::InvalidAmount)),
+        "stake below configured minimum must be rejected"
+    );
+
+    let at_minimum = client.try_create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "a6f7b8c9"),
+        &Platform::Lichess,
+    );
+    assert!(
+        at_minimum.is_ok(),
+        "stake exactly at the configured minimum must be accepted"
+    );
+
+    let above_minimum = client.try_create_match(
+        &player1,
+        &player2,
+        &10_000,
+        &token,
+        &String::from_str(&env, "b7a8c9d0"),
+        &Platform::Lichess,
+    );
+    assert!(
+        above_minimum.is_ok(),
+        "stake above the minimum must be accepted when no maximum is configured"
+    );
+}
+
+#[test]
+fn test_create_match_with_only_maximum_configured() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.set_maximum_stake(&admin, &500);
+
+    let above = client.try_create_match(
+        &player1,
+        &player2,
+        &501,
+        &token,
+        &String::from_str(&env, "c8b9d0e1"),
+        &Platform::Lichess,
+    );
+    assert_eq!(
+        above,
+        Err(Ok(Error::InvalidAmount)),
+        "stake above configured maximum must be rejected"
+    );
+
+    let at_maximum = client.try_create_match(
+        &player1,
+        &player2,
+        &500,
+        &token,
+        &String::from_str(&env, "d9c0e1f2"),
+        &Platform::Lichess,
+    );
+    assert!(
+        at_maximum.is_ok(),
+        "stake exactly at the configured maximum must be accepted"
+    );
+
+    let below_maximum = client.try_create_match(
+        &player1,
+        &player2,
+        &1,
+        &token,
+        &String::from_str(&env, "e0d1f2a3"),
+        &Platform::Lichess,
+    );
+    assert!(
+        below_maximum.is_ok(),
+        "stake below the maximum must be accepted when no minimum is configured"
+    );
+}
+
+#[test]
 fn test_create_match_with_zero_stake_rejected() {
     let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);

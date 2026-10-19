@@ -754,6 +754,10 @@ async fn get_pending_matches(
 ///
 /// `/matches/:match_id` is the frontend-facing alias of `/match/:match_id`.
 ///
+/// Served from the materialized `matches` table, which the poller keeps up to
+/// date incrementally as events are ingested, so this is an O(1) primary-key
+/// lookup rather than a replay of every event for the match.
+///
 /// Cached with a state-aware TTL (see [`api_cache::ttl_for_status`]) and
 /// invalidated eagerly on any contract event for this match, so the TTL only
 /// bounds staleness for matches nothing is happening to. `Active` matches get
@@ -779,7 +783,7 @@ async fn get_match_info(
         );
     }
 
-    match state.db.build_match_info(match_id).await {
+    match state.db.get_match_state(match_id).await {
         Ok(Some(match_info)) => {
             let ttl = api_cache::ttl_for_status(&match_info.status);
             state.api_cache.set_json(&cache_key, &match_info, ttl).await;

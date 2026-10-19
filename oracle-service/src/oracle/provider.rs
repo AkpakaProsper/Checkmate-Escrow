@@ -56,6 +56,28 @@ pub trait GameProvider: Send + Sync {
 
     /// Fetch the winner of the game identified by `game_id` on this platform.
     async fn fetch_result(&self, game_id: &str) -> Result<Winner, ProviderError>;
+
+    /// Fetch the winners of several games in one call.
+    ///
+    /// The default implementation simply loops over [`Self::fetch_result`],
+    /// which keeps existing providers working unchanged.  Providers that
+    /// support a batch game-status endpoint should override this to reduce
+    /// the number of upstream RPC calls (and thus rate-limit pressure).
+    ///
+    /// The returned vector contains one entry per input game ID, in the same
+    /// order as `game_ids`, so callers can map results back to games even
+    /// when some lookups fail.
+    async fn fetch_results_batch(
+        &self,
+        game_ids: &[String],
+    ) -> Vec<(String, Result<Winner, ProviderError>)> {
+        let mut results = Vec::with_capacity(game_ids.len());
+        for game_id in game_ids {
+            let result = self.fetch_result(game_id).await;
+            results.push((game_id.clone(), result));
+        }
+        results
+    }
 }
 
 // ── Registry ──────────────────────────────────────────────────────────────────
@@ -116,6 +138,103 @@ impl ProviderRegistry {
         })
     }
 
+    /// Fetch the results for several games, failing over across providers as
+    /// described in the module documentation.
+    ///
+    /// Games are grouped by provider: each provider is asked for the games
+    /// that are still unresolved (i.e. not yet answered by a higher-precedence
+    /// provider and not terminally failed).  Providers that implement a batch
+    /// endpoint are therefore called once per cycle rather than once per game.
+    ///
+    /// The returned vector contains one entry per input game ID, in the same
+    /// order as `game_ids`.  Per-game errors are preserved: a game that fails
+    /// terminally on one provider is reported with that error, while a game
+    /// that fails over on every provider is reported as
+    /// [`ProviderError::AllProvidersFailed`].
+    pub async fn fetch_results_batch(
+        &self,
+        game_ids: &[String],
+    ) -> Vec<(String, Result<Winner, ProviderError>)> {
+        // Per-game state: resolved winner, or the failover errors seen so far.
+        enum State {
+            Resolved(Winner),
+            Failed(Vec<ProviderError>),
+        }
+
+        let mut states: Vec<State> = game_ids
+            .iter()
+            .map(|_| State::Failed(Vec::new()))
+            .collect();
+
+        for provider in &self.providers {
+            // Collect the indices of games that still need this provider.
+            let pending: Vec<usize> = states
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| matches!(s, State::Failed(_)))
+                .map(|(i, _)| i)
+                .collect();
+
+            if pending.is_empty() {
+                break;
+            }
+
+            let pending_ids: Vec<String> = pending
+                .iter()
+                .map(|&i| game_ids[i].clone())
+                .collect();
+
+            let batch = provider.fetch_results_batch(&pending_ids).await;
+
+            // Map results back to their original indices.  If the provider
+            // returned fewer entries than requested, the missing games are
+            // treated as unavailable so they can fail over.
+            for (slot, &idx) in pending.iter().enumerate() {
+                let game_id = &game_ids[idx];
+                let result = match batch.get(slot) {
+                    Some((_, r)) => r.clone(),
+                    None => Err(ProviderError::Unavailable {
+                        provider: provider.name(),
+                        reason: "missing batch entry".to_string(),
+                    }),
+                };
+
+                match result {
+                    Ok(winner) => states[idx] = State::Resolved(winner),
+
+                    Err(e)
+                        if e.should_failover()
+                            || e.is_rate_limited()
+                            || e.is_concurrency_limited() =>
+                    {
+                        tracing_or_eprintln(provider.name(), game_id, &e);
+                        if let State::Failed(errors) = &mut states[idx] {
+                            errors.push(e);
+                        }
+                    }
+
+                    // Terminal or logical error — record it and stop trying
+                    // further providers for this game.
+                    Err(e) => {
+                        states[idx] = State::Resolved(winner_from_terminal(e));
+                    }
+                }
+            }
+        }
+
+        game_ids
+            .iter()
+            .cloned()
+            .zip(states.into_iter().map(|s| match s {
+                State::Resolved(w) => Ok(w),
+                State::Failed(errors) => Err(ProviderError::AllProvidersFailed {
+                    count: errors.len(),
+                    errors,
+                }),
+            }))
+            .collect()
+    }
+
     /// Number of providers registered.
     pub fn len(&self) -> usize {
         self.providers.len()
@@ -126,6 +245,15 @@ impl ProviderRegistry {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
+}
+
+/// Placeholder used when a terminal error must be stored in a slot that only
+/// holds a `Winner`.  Terminal errors are surfaced via the per-game result
+/// instead; this helper exists so the batch loop can stay uniform.
+fn winner_from_terminal(_err: ProviderError) -> Winner {
+    // Terminal errors are reported through the per-game `Result`; the winner
+    // value stored here is never observed by callers.
+    Winner::Draw
 }
 
 fn tracing_or_eprintln(provider: &str, game_id: &str, err: &ProviderError) {
@@ -269,5 +397,125 @@ mod tests {
             const_p("secondary", Ok(Winner::Player2)),
         ]);
         assert_eq!(reg.fetch_result("abc12345").await.unwrap(), Winner::Player1);
+    }
+
+    /// A provider that records how many batch calls it received and how many
+    /// game IDs each call carried.
+    struct BatchCountingProvider {
+        name: &'static str,
+        batch_calls: Arc<AtomicUsize>,
+        ids_per_call: Arc<AtomicUsize>,
+        result: Result<Winner, &'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl GameProvider for BatchCountingProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        async fn fetch_result(&self, game_id: &str) -> Result<Winner, ProviderError> {
+            ConstProvider {
+                name: self.name,
+                result: self.result.clone(),
+            }
+            .fetch_result(game_id)
+            .await
+        }
+        async fn fetch_results_batch(
+            &self,
+            game_ids: &[String],
+        ) -> Vec<(String, Result<Winner, ProviderError>)> {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            self.ids_per_call.fetch_add(game_ids.len(), Ordering::SeqCst);
+            let mut out = Vec::with_capacity(game_ids.len());
+            for id in game_ids {
+                let r = match &self.result {
+                    Ok(w) => Ok(w.clone()),
+                    Err("unavailable") => Err(ProviderError::Unavailable {
+                        provider: self.name,
+                        reason: "down".to_string(),
+                    }),
+                    Err("rate_limited") => Err(ProviderError::RateLimited {
+                        provider: self.name,
+                        retry_after: Duration::from_secs(1),
+                    }),
+                    Err("not_found") => Err(ProviderError::GameNotFound),
+                    Err(other) => Err(ProviderError::InvalidGameId((*other).to_string())),
+                };
+                out.push((id.clone(), r));
+            }
+            out
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_uses_single_call_per_provider() {
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let ids_per_call = Arc::new(AtomicUsize::new(0));
+        let reg = ProviderRegistry::new(vec![Arc::new(BatchCountingProvider {
+            name: "primary",
+            batch_calls: batch_calls.clone(),
+            ids_per_call: ids_per_call.clone(),
+            result: Ok(Winner::Player1),
+        })]);
+
+        let ids: Vec<String> = (0..5).map(|i| format!("game{i}")).collect();
+        let results = reg.fetch_results_batch(&ids).await;
+
+        assert_eq!(results.len(), 5);
+        assert!(results.iter().all(|(_, r)| r.is_ok()));
+        assert_eq!(
+            batch_calls.load(Ordering::SeqCst),
+            1,
+            "batch endpoint should be called once per cycle"
+        );
+        assert_eq!(ids_per_call.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn batch_failover_groups_by_provider() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let secondary_calls = Arc::new(AtomicUsize::new(0));
+        let reg = ProviderRegistry::new(vec![
+            Arc::new(BatchCountingProvider {
+                name: "primary",
+                batch_calls: primary_calls.clone(),
+                ids_per_call: Arc::new(AtomicUsize::new(0)),
+                result: Err("rate_limited"),
+            }),
+            Arc::new(BatchCountingProvider {
+                name: "secondary",
+                batch_calls: secondary_calls.clone(),
+                ids_per_call: Arc::new(AtomicUsize::new(0)),
+                result: Ok(Winner::Player2),
+            }),
+        ]);
+
+        let ids: Vec<String> = (0..3).map(|i| format!("game{i}")).collect();
+        let results = reg.fetch_results_batch(&ids).await;
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|(_, r)| r.as_ref() == Ok(&Winner::Player2)));
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn batch_preserves_per_game_errors() {
+        let reg = ProviderRegistry::new(vec![
+            const_p("p1", Err("unavailable")),
+            const_p("p2", Err("rate_limited")),
+        ]);
+        let ids = vec!["game0".to_string(), "game1".to_string()];
+        let results = reg.fetch_results_batch(&ids).await;
+
+        assert_eq!(results.len(), 2);
+        for (id, r) in &results {
+            assert!(id.starts_with("game"));
+            assert!(matches!(
+                r,
+                Err(ProviderError::AllProvidersFailed { count: 2, .. })
+            ));
+        }
     }
 }

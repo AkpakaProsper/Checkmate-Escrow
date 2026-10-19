@@ -18,6 +18,7 @@ use event_indexer::cache::EventCache;
 use event_indexer::db::Database;
 use event_indexer::models::MatchInfo;
 use event_indexer::rpc::SorobanRpcClient;
+use sqlx::Row;
 
 const UNREACHABLE_DSN: &str = "postgres://nobody:nobody@127.0.0.1:1/nowhere";
 
@@ -112,6 +113,107 @@ async fn get_match_invalid_match_id_returns_404() {
         "Error message should say 'not found': {}",
         error_msg
     );
+}
+
+/// The `/matches/:id` handler must serve the materialized `matches` row
+/// directly, without replaying the event log. We seed only the materialized
+/// table (no events at all) and assert the endpoint returns exactly that state.
+#[tokio::test]
+async fn get_match_served_from_materialized_table() {
+    if std::env::var("DATABASE_URL").is_err() {
+        println!("Skipping get_match_served_from_materialized_table: DATABASE_URL not set");
+        return;
+    }
+
+    let db_url = std::env::var("DATABASE_URL").unwrap();
+    let db = Arc::new(Database::from_dsns(&db_url, &db_url, 2, 2).expect("db"));
+    db.init_schema().await.expect("schema");
+
+    let match_id: u64 = 424_242;
+    let player1 = "GPLAYER1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let player2 = "GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+    // Seed ONLY the materialized table; no events exist for this match.
+    sqlx::query(
+        "INSERT INTO matches (match_id, player1, player2, state, winner, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, NOW()) \
+         ON CONFLICT (match_id) DO UPDATE SET \
+             player1 = EXCLUDED.player1, \
+             player2 = EXCLUDED.player2, \
+             state = EXCLUDED.state, \
+             winner = EXCLUDED.winner, \
+             updated_at = NOW()",
+    )
+    .bind(match_id as i64)
+    .bind(player1)
+    .bind(player2)
+    .bind("Completed")
+    .bind(Some(player1))
+    .execute(db.pool())
+    .await
+    .expect("seed materialized match row");
+
+    let cache = Arc::new(RwLock::new(EventCache::new(16)));
+    let rpc = Arc::new(SorobanRpcClient::new("http://127.0.0.1:1").unwrap());
+    let app = build_router(db.clone(), cache, rpc, Arc::new(ApiCache::disabled()), None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/matches/{}", match_id))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Expected 200 for materialized match, body: {}",
+        body
+    );
+
+    let parsed: ApiResponse<Option<MatchInfo>> =
+        serde_json::from_str(&body).expect("Response should be valid JSON ApiResponse");
+    assert!(parsed.success, "Response success should be true");
+    let info = parsed
+        .data
+        .expect("Response data should contain the materialized match");
+
+    assert_eq!(info.match_id, match_id, "match_id must match seeded row");
+    assert_eq!(info.player1, player1, "player1 must come from matches table");
+    assert_eq!(info.player2, player2, "player2 must come from matches table");
+    assert_eq!(info.state, "Completed", "state must come from matches table");
+    assert_eq!(
+        info.winner.as_deref(),
+        Some(player1),
+        "winner must come from matches table"
+    );
+
+    // Confirm the materialized row is what was read: no events were ever
+    // inserted for this match, so a replay-based implementation would have
+    // returned 404 (or an empty/default state) instead.
+    let event_count: i64 = sqlx::query("SELECT COUNT(*) AS count FROM events WHERE match_id = $1")
+        .bind(match_id as i64)
+        .fetch_one(db.pool())
+        .await
+        .expect("count events")
+        .get("count");
+    assert_eq!(
+        event_count, 0,
+        "Test invariant: no events should exist for the seeded match"
+    );
+
+    // Clean up the seeded row so repeated runs stay deterministic.
+    let _ = sqlx::query("DELETE FROM matches WHERE match_id = $1")
+        .bind(match_id as i64)
+        .execute(db.pool())
+        .await;
 }
 
 #[tokio::test]

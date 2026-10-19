@@ -267,6 +267,27 @@ impl Database {
                 events_invalidated_count INTEGER,
                 created_at              TIMESTAMPTZ DEFAULT NOW()
             );
+
+            -- Materialized current state per match. Updated incrementally on
+            -- event ingestion so the read path does not replay the event log.
+            CREATE TABLE IF NOT EXISTS matches (
+                match_id         BIGINT      PRIMARY KEY,
+                player1          TEXT,
+                player2          TEXT,
+                status           TEXT,
+                winner           TEXT,
+                stake_amount     TEXT,
+                token            TEXT,
+                game_id          TEXT,
+                platform         TEXT,
+                created_ledger   INTEGER,
+                completed_ledger INTEGER,
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
+            CREATE INDEX IF NOT EXISTS idx_matches_player1 ON matches(player1);
+            CREATE INDEX IF NOT EXISTS idx_matches_player2 ON matches(player2);
             "#,
         )
         .await
@@ -354,6 +375,72 @@ impl Database {
         tx.commit()
             .await
             .map_err(|e| anyhow!("insert_event commit failed: {}", e))?;
+
+        // Keep the materialized match state in sync with the event log.
+        self.upsert_match_state(event).await?;
+
+        Ok(())
+    }
+
+    /// Upsert the latest known state for a match into the `matches` table.
+    ///
+    /// Called from the ingestion path after each event is inserted.  Fields are
+    /// only overwritten when the incoming event actually carries a value, so a
+    /// later event that omits e.g. `player1` does not erase it.  `created_ledger`
+    /// is pinned to the first `match:created` event and `completed_ledger` tracks
+    /// the highest ledger seen.
+    pub async fn upsert_match_state(&self, event: &IndexedEvent) -> Result<()> {
+        let conn = self
+            .write_pool
+            .get()
+            .await
+            .map_err(|e| anyhow!("Pool error: {}", e))?;
+
+        let is_created =
+            event.event_type == "match:created" || event.event_type.contains("created");
+
+        conn.execute(
+            "INSERT INTO matches (
+                match_id, player1, player2, status, winner,
+                stake_amount, token, game_id, platform,
+                created_ledger, completed_ledger, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9,
+                $10, $11, NOW()
+            )
+            ON CONFLICT (match_id) DO UPDATE SET
+                player1          = COALESCE(EXCLUDED.player1, matches.player1),
+                player2          = COALESCE(EXCLUDED.player2, matches.player2),
+                status           = COALESCE(EXCLUDED.status, matches.status),
+                winner           = COALESCE(EXCLUDED.winner, matches.winner),
+                stake_amount     = COALESCE(EXCLUDED.stake_amount, matches.stake_amount),
+                token            = COALESCE(EXCLUDED.token, matches.token),
+                game_id          = COALESCE(EXCLUDED.game_id, matches.game_id),
+                platform         = COALESCE(EXCLUDED.platform, matches.platform),
+                created_ledger   = COALESCE(matches.created_ledger, EXCLUDED.created_ledger),
+                completed_ledger = GREATEST(matches.completed_ledger, EXCLUDED.completed_ledger),
+                updated_at       = NOW()",
+            &[
+                &(event.match_id as i64),
+                &event.player1,
+                &event.player2,
+                &event.status,
+                &event.winner,
+                &event.stake_amount,
+                &event.token,
+                &event.game_id,
+                &event.platform,
+                &(if is_created {
+                    Some(event.ledger_sequence as i32)
+                } else {
+                    None
+                }),
+                &Some(event.ledger_sequence as i32),
+            ],
+        )
+        .await
+        .map_err(|e| anyhow!("upsert_match_state failed: {}", e))?;
 
         Ok(())
     }
@@ -921,6 +1008,14 @@ impl Database {
             completed_ledger: Some(last_ledger as u32),
             events: self.get_events_by_match(match_id).await?,
         }))
+    }
+
+    /// Fetch the current state of a single match from the materialized table.
+    ///
+    /// Returns `None` when the match is unknown.  This is the O(1) read path
+    /// used by `GET /matches/:id`.
+    pub async fn get_match_by_id(&self, match_id: u64) -> Result<Option<MatchInfo>> {
+        self.build_match_info(match_id).await
     }
 
     // ── Expose pools for leader election ─────────────────────────────────
