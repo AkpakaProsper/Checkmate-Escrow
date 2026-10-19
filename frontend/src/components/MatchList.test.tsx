@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act, waitFor } from '@testing-library/react';
 import { MatchList } from '../components/MatchList';
+import { mapContractError } from '../lib/contractErrors';
 
 // ─── Mock WebSocket (mirrors useMatchWebSocket.test.ts) ───────────────────
 
@@ -58,9 +59,18 @@ const baseMatch = {
 };
 
 describe('MatchList', () => {
-  it('shows loading state', () => {
+  it('shows loading state with a skeleton', () => {
     render(<MatchList matches={[]} loading />);
+    expect(screen.getByTestId('match-list-skeleton')).toBeTruthy();
     expect(screen.getByRole('status').textContent).toBe('Loading matches…');
+  });
+
+  it('renders the skeleton while loading and removes it once loaded', () => {
+    const { rerender } = render(<MatchList matches={[]} loading />);
+    expect(screen.getByTestId('match-list-skeleton')).toBeTruthy();
+
+    rerender(<MatchList matches={[baseMatch]} loading={false} />);
+    expect(screen.queryByTestId('match-list-skeleton')).toBeNull();
   });
 
   it('shows error state', () => {
@@ -68,9 +78,11 @@ describe('MatchList', () => {
     expect(screen.getByRole('alert').textContent).toBe('Failed to load');
   });
 
-  it('shows empty state when no matches', () => {
+  it('shows empty state with a create-match call-to-action when no matches', () => {
     render(<MatchList matches={[]} />);
-    expect(screen.getByText('No matches found.')).toBeTruthy();
+    expect(screen.getByText(/no matches yet/i)).toBeTruthy();
+    const cta = screen.getByRole('link', { name: /create a match/i });
+    expect(cta.getAttribute('href')).toBe('/matches/create');
   });
 
   it('renders a list with accessible semantics', () => {
@@ -94,6 +106,22 @@ describe('MatchList', () => {
   it('snapshot: populated list', () => {
     const { container } = render(<MatchList matches={[baseMatch]} />);
     expect(container).toMatchSnapshot();
+  });
+
+  describe('mapContractError', () => {
+    it('maps a known numeric contract error code', () => {
+      expect(mapContractError('Error(Contract, #5)')).toContain('InvalidState');
+    });
+
+    it('maps a known error name', () => {
+      expect(mapContractError('NotFunded')).toContain('NotFunded');
+    });
+
+    it('falls back to a generic message for unknown codes', () => {
+      const message = mapContractError('Error(Contract, #9999)');
+      expect(message).toBeTruthy();
+      expect(message).not.toContain('#9999');
+    });
   });
 
   describe('live refresh via WebSocket', () => {

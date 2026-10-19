@@ -367,6 +367,14 @@ impl OracleContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
+        // Reject addresses that never registered via `register_oracle_with_stake`
+        // so a slash cannot be staged for a phantom (non-oracle) address.
+        let registration: OracleRegistration = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleRegistration(oracle_address.clone()))
+            .ok_or(Error::NotRegisteredOracle)?;
+
         // Reject if a pending slash already exists for this (oracle, match_id) pair.
         // Silently overwriting would reset `eligible_ledger`, potentially shortening or
         // extending the governance grace window unintentionally.
@@ -377,12 +385,6 @@ impl OracleContract {
         {
             return Err(Error::SlashAlreadyPending);
         }
-
-        let registration: OracleRegistration = env
-            .storage()
-            .instance()
-            .get(&DataKey::OracleRegistration(oracle_address.clone()))
-            .ok_or(Error::InsufficientStake)?;
 
         if slash_amount <= 0 || slash_amount > registration.oracle_stake {
             return Err(Error::InsufficientStake);
@@ -1239,6 +1241,23 @@ impl OracleContract {
         page
     }
 
+    /// Return the list of all currently approved oracle addresses.
+    ///
+    /// This is the authoritative on-chain view of the approved-oracle set,
+    /// maintained alongside the per-oracle approval records by
+    /// `add_approved_oracle` / `remove_approved_oracle`. Monitoring tools can
+    /// read it directly instead of reconstructing the set from
+    /// `admin/ora_add` and `admin/ora_rm` events.
+    ///
+    /// Returns an empty `Vec` when no oracle has been approved.
+    pub fn get_approved_oracles(env: Env) -> Vec<Address> {
+        extend_instance_ttl(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::ApprovedOracles)
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Returns performance metrics and SLA status for a registered oracle.
     pub fn get_oracle_metrics(env: Env, oracle_address: Address) -> OracleMetrics {
         env.storage()
@@ -1254,7 +1273,58 @@ impl OracleContract {
             })
     }
 
-    /// Admin-only function to deactivate an oracle whose average response time exceeds the SLA target (> 5s).
+    /// Set the SLA response-time threshold (in milliseconds) used by
+    /// [`Self::deactivate_slow_oracle`]. Admin-only.
+    ///
+    /// When never configured, the contract falls back to
+    /// [`SLA_MAX_RESPONSE_TIME_MS`] (5 seconds).
+    ///
+    /// Emits an `oracle / sla_thresh` event with the new threshold.
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`] — contract has not been initialized or caller is not the admin.
+    /// - [`Error::InvalidThreshold`] — `threshold_ms` is 0.
+    pub fn set_sla_threshold(env: Env, threshold_ms: u64) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
+        if threshold_ms == 0 {
+            return Err(Error::InvalidThreshold);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SlaThreshold, &threshold_ms);
+
+        env.events().publish(
+            (Symbol::new(&env, "oracle"), symbol_short!("sla_thrsh")),
+            threshold_ms,
+        );
+        Ok(())
+    }
+
+    /// Return the currently configured SLA response-time threshold, in
+    /// milliseconds. Defaults to [`SLA_MAX_RESPONSE_TIME_MS`] if never set.
+    pub fn get_sla_threshold(env: Env) -> u64 {
+        extend_instance_ttl(&env);
+        Self::sla_threshold(&env)
+    }
+
+    /// Read the configured SLA threshold, defaulting to
+    /// [`SLA_MAX_RESPONSE_TIME_MS`].
+    fn sla_threshold(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SlaThreshold)
+            .unwrap_or(SLA_MAX_RESPONSE_TIME_MS)
+    }
+
+    /// Admin-only function to deactivate an oracle whose average response time exceeds the SLA target.
     pub fn deactivate_slow_oracle(env: Env, oracle_address: Address) -> Result<(), Error> {
         extend_instance_ttl(&env);
         let admin: Address = env
@@ -1270,7 +1340,7 @@ impl OracleContract {
             .get(&DataKey::OracleMetrics(oracle_address.clone()))
             .ok_or(Error::ResultNotFound)?;
 
-        if metrics.avg_response_time_ms <= SLA_MAX_RESPONSE_TIME_MS {
+        if metrics.avg_response_time_ms <= Self::sla_threshold(&env) {
             return Err(Error::OracleNotSlow);
         }
 
@@ -1520,6 +1590,44 @@ impl OracleContract {
         env.storage()
             .instance()
             .set(&DataKey::OracleEligibilityVersion, &version);
+    }
+
+    /// Append `oracle` to the approved-oracle list if not already present.
+    /// Keeps `DataKey::ApprovedOracles` in sync with the per-oracle approval
+    /// records maintained by `add_approved_oracle`.
+    fn add_to_approved_list(env: &Env, oracle: &Address) {
+        let mut list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovedOracles)
+            .unwrap_or(Vec::new(env));
+        if !list.contains(oracle) {
+            list.push_back(oracle.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::ApprovedOracles, &list);
+        }
+    }
+
+    /// Remove `oracle` from the approved-oracle list, if present. Keeps
+    /// `DataKey::ApprovedOracles` in sync with the per-oracle approval
+    /// records maintained by `remove_approved_oracle`.
+    fn remove_from_approved_list(env: &Env, oracle: &Address) {
+        let list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovedOracles)
+            .unwrap_or(Vec::new(env));
+        let mut updated = Vec::new(env);
+        for i in 0..list.len() {
+            let addr = list.get(i).unwrap();
+            if addr != *oracle {
+                updated.push_back(addr);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ApprovedOracles, &updated);
     }
 
     /// Slash `bps` basis points of `oracle`'s remaining stake, transferring

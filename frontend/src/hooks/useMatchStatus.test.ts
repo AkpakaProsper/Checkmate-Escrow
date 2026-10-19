@@ -322,9 +322,8 @@ describe('useMatchStatus', () => {
       expect(result.current.match).toBe(null);
     });
 
-    it('should not poll after unmount when timers are advanced', async () => {
-      const mockMatch = createMockMatch({ state: MatchState.Active });
-      const getMatchFn = vi.fn().mockResolvedValue(mockMatch);
+    it('should leave no pending timers after unmount', async () => {
+      const getMatchFn = vi.fn().mockResolvedValue(createMockMatch({ state: MatchState.Active }));
 
       const { unmount } = renderHook(() =>
         useMatchStatus(1, getMatchFn, { interval: 5000 })
@@ -333,56 +332,69 @@ describe('useMatchStatus', () => {
       await waitFor(() => {
         expect(getMatchFn).toHaveBeenCalledTimes(1);
       });
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
 
       unmount();
 
-      // Advance timers well past several intervals - no further calls expected
-      act(() => {
-        vi.advanceTimersByTime(50000);
-      });
-
-      expect(getMatchFn).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
     });
 
-    it('should not update loading, match, or error when a pending fetch resolves after unmount', async () => {
-      const mockMatch = createMockMatch({ state: MatchState.Active });
-      let resolveMatch: (value: Match) => void;
-      const getMatchFn = vi.fn(
-        () =>
-          new Promise<Match>((resolve) => {
-            resolveMatch = resolve;
-          })
-      );
+    it('should not re-render when a poll resolves after unmount', async () => {
+      const activeMatch = createMockMatch({ state: MatchState.Active });
+      let resolvePoll: (value: Match) => void;
+      const getMatchFn = vi
+        .fn()
+        .mockResolvedValueOnce(activeMatch)
+        .mockImplementationOnce(
+          () =>
+            new Promise<Match>((resolve) => {
+              resolvePoll = resolve;
+            })
+        );
 
-      const { result, unmount } = renderHook(() =>
-        useMatchStatus(1, getMatchFn, { interval: 5000 })
-      );
+      let renders = 0;
+      const { result, unmount } = renderHook(() => {
+        renders += 1;
+        return useMatchStatus(1, getMatchFn, { interval: 5000 });
+      });
 
-      // Capture pre-unmount values
-      const preUnmountLoading = result.current.loading;
-      const preUnmountMatch = result.current.match;
-      const preUnmountError = result.current.error;
+      await waitFor(() => {
+        expect(result.current.match).toEqual(activeMatch);
+      });
 
-      expect(preUnmountLoading).toBe(true);
-      expect(preUnmountMatch).toBe(null);
-      expect(preUnmountError).toBe(null);
+      // Start a poll, then unmount while it is still in flight.
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(getMatchFn).toHaveBeenCalledTimes(2);
 
       unmount();
+      const rendersAtUnmount = renders;
 
-      // Resolve the pending fetch after unmount
       await act(async () => {
-        resolveMatch!(mockMatch);
+        resolvePoll!(createMockMatch({ state: MatchState.Completed }));
+        await vi.advanceTimersByTimeAsync(20000);
       });
 
-      // Advance timers to ensure no polling or state updates occur
-      act(() => {
-        vi.advanceTimersByTime(20000);
+      expect(renders).toBe(rendersAtUnmount);
+      expect(getMatchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('should not restart polling when given a new inline fetcher each render', async () => {
+      const mockMatch = createMockMatch({ state: MatchState.Active });
+      const getMatchFn = vi.fn().mockResolvedValue(mockMatch);
+
+      const { result, rerender } = renderHook(() =>
+        useMatchStatus(1, (id) => getMatchFn(id), { interval: 5000 })
+      );
+
+      await waitFor(() => {
+        expect(result.current.match).toEqual(mockMatch);
       });
 
-      // State must remain at pre-unmount values
-      expect(result.current.loading).toBe(preUnmountLoading);
-      expect(result.current.match).toBe(preUnmountMatch);
-      expect(result.current.error).toBe(preUnmountError);
+      rerender();
+      rerender();
+
       expect(getMatchFn).toHaveBeenCalledTimes(1);
     });
   });
