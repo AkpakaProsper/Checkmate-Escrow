@@ -215,4 +215,3 @@ mod player_rating;
 mod issue_1525;
 mod issue_1617;
 mod issue_1618;
-mod vesting_override;
