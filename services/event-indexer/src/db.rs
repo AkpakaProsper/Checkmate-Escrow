@@ -251,6 +251,8 @@ impl Database {
             CREATE TABLE IF NOT EXISTS ingestion_state (
                 contract_id             TEXT        PRIMARY KEY,
                 last_polled_ledger      INTEGER,
+                last_polled_cursor        TEXT,
+                fallback_start_ledger     INTEGER,
                 last_polled_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 events_ingested         BIGINT      DEFAULT 0,
                 last_error              TEXT,
@@ -492,6 +494,70 @@ impl Database {
 
         Ok(())
     }
+
+    /// Ingestion state with optional cursor for resumption.
+    #[derive(Debug)]
+    pub struct IngestionState {
+        pub last_polled_ledger: Option<u32>,
+        pub last_polled_cursor: Option<String>,
+        pub fallback_start_ledger: Option<u32>,
+    }
+
+    /// Get latest ingestion state including cursor.
+    pub async fn get_ingestion_state(&self, contract_id: &str) -> Result<IngestionState> {
+        let conn = self
+            .write_pool
+            .get()
+            .await
+            .map_err(|e| anyhow!("Pool error: {}", e))?;
+
+        let row = conn
+            .query_opt(
+                "SELECT last_polled_ledger, last_polled_cursor, fallback_start_ledger FROM ingestion_state WHERE contract_id = $1",
+                &[&contract_id],
+            )
+            .await
+            .map_err(|e| anyhow!("get_ingestion_state failed: {}", e))?;
+
+        Ok(row.map_or(IngestionState {
+            last_polled_ledger: None,
+            last_polled_cursor: None,
+            fallback_start_ledger: None,
+        }, |r| IngestionState {
+            last_polled_ledger: r.get::<_, Option<i32>>(0).map(|l| l as u32),
+            last_polled_cursor: r.get::<_, Option<String>>(1),
+            fallback_start_ledger: r.get::<_, Option<i32>>(2).map(|l| l as u32),
+        }))
+    }
+
+    /// Update ingestion state after a poll (with optional cursor).
+    pub async fn update_ingestion_state(
+        &self,
+        contract_id: &str,
+        ledger: u32,
+        cursor: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self
+            .write_pool
+            .get()
+            .await
+            .map_err(|e| anyhow!("Pool error: {}", e))?;
+
+        conn.execute(
+            "INSERT INTO ingestion_state (contract_id, last_polled_ledger, last_polled_cursor, last_polled_at, last_error, last_error_at)
+             VALUES ($1, $2, $3, NOW(), $4, CASE WHEN $4 IS NOT NULL THEN NOW() ELSE NULL END)
+             ON CONFLICT (contract_id) DO UPDATE
+             SET last_polled_ledger = $2, last_polled_cursor = $3, last_polled_at = NOW(), last_error = $4,
+                 last_error_at = CASE WHEN $4 IS NOT NULL THEN NOW() ELSE last_error_at END",
+            &[&contract_id, &(ledger as i32), &cursor, &error],
+        )
+        .await
+        .map_err(|e| anyhow!("update_ingestion_state failed: {}", e))?;
+
+        Ok(())
+    }
+
 
     /// Mark events in a ledger range as invalidated by reorg.
     pub async fn mark_events_as_invalid(

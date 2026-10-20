@@ -82,8 +82,9 @@ impl SorobanRpcClient {
         &self,
         contract_id: &str,
         start_ledger: Option<u32>,
+        cursor: Option<&str>,
         limit: Option<u32>,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<GetEventsResponse> {
         let start = start_ledger.unwrap_or(0);
         let limit = limit.unwrap_or(100);
 
@@ -92,20 +93,47 @@ impl SorobanRpcClient {
             "contractIds": [contract_id]
         })];
 
-        let params = json!({
+        let mut params = json!({
             "startLedger": start,
             "limit": limit,
             "filters": filters,
         });
 
+        if let Some(cursor) = cursor {
+            params["cursor"] = json!(cursor);
+        }
+
         let result = self.make_request("getEvents", params).await?;
 
-        if let Some(events) = result.get("events").and_then(|e| e.as_array()) {
-            Ok(events.clone())
-        } else {
-            Ok(Vec::new())
+        // Check for cursor-related errors in the response
+        if let Some(error) = result.get("error") {
+            let error_msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            let error_code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+            
+            // Cursor invalidation errors (Stellar RPC specific)
+            if error_msg.to_lowercase().contains("cursor") && 
+               (error_msg.to_lowercase().contains("not found") ||
+                error_msg.to_lowercase().contains("too old") ||
+                error_msg.to_lowercase().contains("invalid") ||
+                error_msg.to_lowercase().contains("expired") ||
+                error_code == -32602) { // Invalid params often used for cursor errors
+                return Err(anyhow!("CursorInvalid: {}", error_msg));
+            }
         }
+
+        let events = result.get("events").and_then(|e| e.as_array()).cloned().unwrap_or(Vec::new());
+        let next_cursor = result.get("cursor").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+        Ok(GetEventsResponse { events, next_cursor })
     }
+
+    /// Response from getEvents RPC call including pagination cursor.
+    #[derive(Debug)]
+    pub struct GetEventsResponse {
+        pub events: Vec<Value>,
+        pub next_cursor: Option<String>,
+    }
+
 
     pub async fn get_ledger(&self) -> Result<u32> {
         let result = self.make_request("getLedger", json!({})).await?;
@@ -131,6 +159,7 @@ pub async fn event_poller(
     cache: Arc<RwLock<EventCache>>,
     api_cache: Arc<ApiCache>,
     mut leader: LeaderElection,
+    config: &Config,
     contract_id: &str,
     poll_interval_secs: u64,
 ) -> Result<()> {
@@ -163,7 +192,7 @@ pub async fn event_poller(
             .ok()
             .flatten();
         let span = info_span!("poll_iteration", contract_id, last_polled_ledger = ?last_ledger);
-        match poll_events(&rpc, &db, &cache, &api_cache, contract_id, last_ledger)
+        match poll_events(&rpc, &db, &cache, &api_cache, config, contract_id)
             .instrument(span)
             .await
         {
@@ -215,19 +244,47 @@ async fn poll_events(
     db: &Arc<Database>,
     cache: &Arc<RwLock<EventCache>>,
     api_cache: &Arc<ApiCache>,
+    config: &Config,
     contract_id: &str,
-    _start_ledger: Option<u32>,
 ) -> Result<Option<u32>> {
-    // Load persisted polling state from DB.
-    let last_polled = db.get_latest_polled_ledger(contract_id).await?;
+    // Load persisted polling state from DB (includes cursor).
+    let ingestion_state = db.get_ingestion_state(contract_id).await?;
+    
+    let last_polled = ingestion_state.last_polled_ledger;
+    let cursor = ingestion_state.last_polled_cursor;
+    let fallback_start_ledger = config.fallback_start_ledger;
+    
+    // Determine where to start polling
     let poll_start = last_polled.map(|l| l + 1); // Exclusive-start: next ledger after last polled
 
     debug!(
-        "Poll starting from ledger: {:?} (last_polled: {:?})",
-        poll_start, last_polled
+        "Poll starting from ledger: {:?} (last_polled: {:?}, cursor: {:?}, fallback: {})",
+        poll_start, last_polled, cursor.is_some(), fallback_start_ledger
     );
 
-    let events = rpc.get_events(contract_id, poll_start, Some(100)).await?;
+    // Try polling with cursor first
+    let mut use_cursor = cursor.is_some();
+    let mut events_response = match rpc.get_events(contract_id, poll_start, cursor.as_deref(), Some(100)).await {
+        Ok(resp) => resp,
+        Err(e) if use_cursor && e.to_string().contains("CursorInvalid") => {
+            warn!(
+                "Cursor invalid for contract {}: {}. Falling back to start_ledger={}",
+                contract_id, e, fallback_start_ledger
+            );
+            use_cursor = false;
+            // Fall back to re-indexing from fallback_start_ledger
+            rpc.get_events(contract_id, Some(fallback_start_ledger), None, Some(100)).await?
+        }
+        Err(e) => return Err(e),
+    };
+
+    // If cursor was invalid and we fell back, clear the bad cursor from DB
+    if !use_cursor && cursor.is_some() {
+        // Update DB to clear the invalid cursor
+        db.update_ingestion_state(contract_id, fallback_start_ledger, None, None).await?;
+    }
+
+    let events = events_response.events;
 
     if events.is_empty() {
         debug!("RPC returned no new events for contract {}", contract_id);
@@ -284,14 +341,16 @@ async fn poll_events(
         }
     }
 
-    // Persist the highest ledger we just polled
+    // Persist the highest ledger we just polled AND the new cursor
     if let Some(ledger) = max_ledger {
-        db.update_ingestion_state(contract_id, ledger, None).await?;
-        debug!("Updated ingestion_state: last_polled_ledger = {}", ledger);
+        let new_cursor = events_response.next_cursor;
+        db.update_ingestion_state(contract_id, ledger, new_cursor.as_deref(), None).await?;
+        debug!("Updated ingestion_state: last_polled_ledger = {}, cursor = {:?}", ledger, new_cursor);
     }
 
     Ok(max_ledger)
 }
+
 
 // ── Event parsing ─────────────────────────────────────────────────────────────
 

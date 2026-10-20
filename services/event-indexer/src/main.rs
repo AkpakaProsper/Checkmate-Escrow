@@ -125,6 +125,7 @@ async fn main() -> Result<()> {
                 cache,
                 response_cache,
                 election,
+                &config,
                 &contract,
                 interval,
             )
