@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `confirm_upgrade` — multi-sig confirmation step for contract upgrades. A second authorized address must call `confirm_upgrade` after `schedule_upgrade` and before `execute_upgrade`. This ensures that a single compromised admin key cannot unilaterally deploy arbitrary WASM — both the admin key and the upgrader key must cooperate to execute an upgrade. `execute_upgrade` returns `Error::UpgradeNotConfirmed` (#58) if the confirmation is absent. The confirmation is automatically cleared by both `cancel_upgrade` and `execute_upgrade`.
+- `Error::UpgradeNotConfirmed` (#58) — new error code returned by `execute_upgrade` when the multi-sig confirmation step has not been completed.
+
+### Changed
+- `execute_upgrade` now requires a prior `confirm_upgrade` call. Existing upgrade flows must add a `confirm_upgrade(upgrader)` step between `schedule_upgrade` and `execute_upgrade`. See [docs/upgrade-safety.md](docs/upgrade-safety.md) for the updated procedure.
+- `cancel_upgrade` now also clears any recorded `confirm_upgrade` confirmation so it cannot carry over to a subsequent upgrade cycle.
+- `docs/upgrade-safety.md` — updated upgrade lifecycle diagram and procedure to include the `confirm_upgrade` step.
+- `docs/security.md` — added "Contract Upgrade Multi-Sig" section documenting the threat model and recommendations.
+- `docs/error-codes.md` — added entry for error code #58 `UpgradeNotConfirmed`.
+
+### Added
 - `admin_resolve_stalled_match` — admin-gated recovery function for Active matches stuck after the 24-hour player rollback window expires and the oracle has failed to submit a result for more than 7 days. Provides a bounded recovery path so funds are never permanently locked in the event of prolonged oracle outage or lost signing keys.
 - `ADMIN_STALL_WINDOW_SECONDS` constant (7 days) — configurable threshold after which admin can invoke stall resolution, long enough not to compete with the player-initiated 24-hour rollback window.
 - `admin_freeze_player` / `admin_unfreeze_player` — targeted per-player freeze that blocks a single address from creating matches and depositing, without pausing the contract for other users. The freeze reason is stored on-chain; `is_player_frozen` / `get_frozen_players` expose state. Fund-recovery paths (cancel/expire/claim) and oracle settlement of existing matches are deliberately unaffected.

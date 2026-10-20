@@ -119,6 +119,7 @@ contract source.  For a machine-readable listing, see the
 | `match` / `claim` | `claim_vested_payout` | `(match_id, player, amount_claimed, payout_token)` |
 | `upgrade` / `sched` | `schedule_upgrade` | `(new_wasm_hash, scheduled_at)` |
 | `upgrade` / `cancel` | `cancel_upgrade` | `()` |
+| `upgrade` / `confirm` | `confirm_upgrade` | `upgrader_address` |
 | `upgrade` / `exec` | `execute_upgrade` | `new_wasm_hash` |
 | `upgrade` / `migrated` | `migrate_state` | `(current, target_version)` |
 

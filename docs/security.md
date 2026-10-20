@@ -7,6 +7,7 @@ This document outlines the security considerations, trust assumptions, and risk 
 - [Oracle Trust Assumptions](#oracle-trust-assumptions)
 - [Oracle Compromise](#oracle-compromise)
 - [Admin Key Risks](#admin-key-risks)
+- [Contract Upgrade Multi-Sig](#contract-upgrade-multi-sig)
 - [Re-initialization Protection](#re-initialization-protection)
 - [Pause Mechanism](#pause-mechanism)
 - [Cross-Contract Reentrancy Protection](#cross-contract-reentrancy-protection)
@@ -87,6 +88,7 @@ Both contracts have admin addresses with elevated privileges. Compromise of admi
 3. **Cold Storage**: Store admin keys offline when not in use
 4. **Monitoring**: Monitor admin operations via contract events
 5. **Timelock**: Consider implementing timelocks for critical admin operations
+6. **Upgrade Multi-sig**: Contract upgrades require a second authorized address to call `confirm_upgrade` before `execute_upgrade` can proceed. A single compromised admin key cannot unilaterally deploy arbitrary code — see [Contract Upgrade Multi-Sig](#contract-upgrade-multi-sig) below.
 
 ### Compromise Scenarios
 
@@ -95,6 +97,41 @@ Both contracts have admin addresses with elevated privileges. Compromise of admi
 | Escrow admin key stolen | Contract can be paused, funds locked | Immediate pause, admin rotation |
 | Oracle admin key stolen | Incorrect results can be submitted | Pause oracle, rotate admin, dispute results |
 | Both keys compromised | Complete contract takeover | Emergency pause, contract migration |
+
+## Contract Upgrade Multi-Sig
+
+`execute_upgrade` enforces a two-step confirmation requirement. After
+`schedule_upgrade` stores a pending WASM hash, a **second authorized address**
+must call `confirm_upgrade` before `execute_upgrade` can proceed. If no
+confirmation is on record, `execute_upgrade` returns
+`Error::UpgradeNotConfirmed` (#58).
+
+### Why this matters
+
+Without the confirmation requirement, a single compromised admin key could:
+
+1. Upload a malicious WASM blob.
+2. Schedule an upgrade.
+3. Wait for the 7-day review period.
+4. Execute the upgrade, replacing the contract with arbitrary code.
+
+With the confirmation requirement, the attacker also needs to compromise the
+separate `upgrader` key before execution is possible.
+
+### Threat model
+
+| Scenario | Impact without multi-sig | Impact with multi-sig |
+|----------|-------------------------|-----------------------|
+| Admin key compromised | Attacker can deploy arbitrary code after review period | Attacker cannot execute — upgrader confirmation missing |
+| Upgrader key compromised | N/A | Attacker can confirm but not schedule — both keys needed |
+| Both keys compromised | Complete contract takeover | Same — use hardware wallets for both keys |
+
+### Recommendations
+
+- Store the `upgrader` key on a separate hardware wallet or HSM from the admin key.
+- The `upgrader` address does not require admin privileges — it only needs to sign `confirm_upgrade`.
+- Publicly announce and log the upgrader confirmation so the community can verify the multi-sig step was completed by the expected party.
+- See [docs/upgrade-safety.md](upgrade-safety.md) for the full upgrade procedure.
 
 ## Re-initialization Protection
 

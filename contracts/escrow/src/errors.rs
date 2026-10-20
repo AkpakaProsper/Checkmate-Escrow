@@ -86,4 +86,8 @@ pub enum Error {
     /// `set_dispute_period`, `set_minimum_hold_duration`, and `set_fee_tiers`
     /// when the supplied value is above the configured maximum.
     ConfigValueTooHigh = 57,
+    /// `execute_upgrade` requires a second authorized address to have called
+    /// `confirm_upgrade` after `schedule_upgrade`. This error is returned when
+    /// no confirmation has been recorded for the pending upgrade hash.
+    UpgradeNotConfirmed = 58,
 }
