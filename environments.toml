@@ -52,8 +52,6 @@ network_passphrase = "Test SDF Network ; September 2015"
 rpc_url            = "https://soroban-mainnet.stellar.org"
 network_passphrase = "Public Global Stellar Network ; September 2015"
 
-# Updated to current active endpoint
-# Note: Futurenet may be reset without notice; use with caution
 [futurenet]
 # Stellar futurenet — preview of upcoming protocol features.
 # May be unstable; use only when testing features not yet on testnet.
