@@ -4832,9 +4832,14 @@ impl EscrowContract {
     /// Snapshots are stored in a fixed-size ring buffer keyed by
     /// `DataKey::Snapshot(match_id, slot)` where `slot = index %
     /// MAX_SNAPSHOTS_PER_MATCH`. Once a match's snapshot count exceeds the
-    /// buffer capacity, the oldest entry is silently overwritten — this is
-    /// the storage-pruning mechanism. `DataKey::SnapshotCount` tracks the
-    /// total ever recorded so callers can detect that pruning occurred.
+    /// buffer capacity, the oldest entry is overwritten — this is the
+    /// storage-pruning mechanism. `DataKey::SnapshotCount` tracks the total
+    /// ever recorded so callers can detect that pruning occurred.
+    ///
+    /// Overwrites are no longer silent: when a slot is recycled, a
+    /// `("match", "snapshot_overwritten")` event is published with
+    /// `(match_id, overwritten_index, new_index)` before the slot is
+    /// rewritten, so off-chain indexers can detect the data loss.
     fn record_snapshot(env: &Env, m: &Match, reason: SnapshotReason) {
         let token_symbol = Self::fetch_token_symbol(env, &m.token);
         let escrow_balance = Self::escrow_balance_of(m);
@@ -4845,6 +4850,25 @@ impl EscrowContract {
             .get(&DataKey::SnapshotCount(m.id))
             .unwrap_or(0);
         let slot = index % MAX_SNAPSHOTS_PER_MATCH;
+
+        // Detect ring-buffer wrap-around: if this slot already holds a
+        // snapshot, it is about to be recycled. Report the overwritten
+        // entry's index so indexers can account for the lost snapshot.
+        if index >= MAX_SNAPSHOTS_PER_MATCH {
+            let overwritten_index = env
+                .storage()
+                .persistent()
+                .get::<DataKey, BalanceSnapshot>(&DataKey::Snapshot(m.id, slot))
+                .map(|old| old.index)
+                .unwrap_or(index.saturating_sub(MAX_SNAPSHOTS_PER_MATCH));
+            env.events().publish(
+                (
+                    Symbol::new(env, "match"),
+                    symbol_short!("snap_ovr"),
+                ),
+                (m.id, overwritten_index, index),
+            );
+        }
 
         let nonce: BytesN<32> = env.prng().gen();
         let commitment = Self::compute_commitment(env, m.stake_amount, escrow_balance, &nonce);
