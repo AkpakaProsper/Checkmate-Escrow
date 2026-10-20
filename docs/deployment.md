@@ -176,6 +176,69 @@ Before launching on mainnet, verify each item below. These checks are intended t
 - [ ] The token allowlist has been reviewed. Confirm that the approved token set and contract IDs match the production plan. This prevents unintended assets from being accepted in matches.
 - [ ] Contract audit confirmation is recorded. Make sure the deployed contracts have passed a recent security review or audit and that any outstanding issues are understood and accepted. This lowers the chance of launching with an unresolved vulnerability.
 - [ ] Monitoring and alerting are in place. Configure alerts for deployment status, admin changes, oracle submissions, pause events, and unusual match activity. This gives operators early visibility into incidents or unexpected behavior.
+- [ ] Metrics endpoint authentication is enabled. Set `METRICS_AUTH_USERNAME` and `METRICS_AUTH_PASSWORD` on the oracle service so the Prometheus `/metrics` endpoint is not publicly readable (see [Metrics Endpoint Authentication](#metrics-endpoint-authentication)).
+
+## Metrics Endpoint Authentication
+
+The oracle service exposes Prometheus metrics at `/metrics`. This endpoint
+leaks operational data — match counts, error rates, RPC latency — to anyone
+who can reach the service, so it should be protected in production.
+
+Authentication is optional and controlled by two environment variables:
+
+| Variable                 | Description                                              | Default    |
+|--------------------------|----------------------------------------------------------|------------|
+| `METRICS_AUTH_USERNAME`  | Username required for HTTP Basic Auth on `/metrics`      | _unset_    |
+| `METRICS_AUTH_PASSWORD`  | Password required for HTTP Basic Auth on `/metrics`      | _unset_    |
+
+### Behavior
+
+- **Both set:** `/metrics` requires HTTP Basic Auth. Requests with missing or
+  incorrect credentials receive `401 Unauthorized` with a
+  `WWW-Authenticate: Basic realm="metrics"` header.
+- **Either unset:** the endpoint is open (no authentication). This is the
+  backward-compatible default, suitable for local development or when the
+  service is only reachable from a trusted network.
+
+Set both variables to the same values on every oracle instance and restart the
+service for the change to take effect:
+
+```bash
+export METRICS_AUTH_USERNAME=prometheus
+export METRICS_AUTH_PASSWORD='<strong-random-password>'
+```
+
+### Prometheus scrape configuration
+
+When auth is enabled, configure the scrape job with `basic_auth`:
+
+```yaml
+scrape_configs:
+  - job_name: checkmate-oracle
+    metrics_path: /metrics
+    basic_auth:
+      username: prometheus
+      password: '<strong-random-password>'
+    static_configs:
+      - targets: ['oracle.example.com:8080']
+```
+
+Prefer `password_file` over an inline `password` so the secret is not stored
+in the Prometheus config:
+
+```yaml
+    basic_auth:
+      username: prometheus
+      password_file: /etc/prometheus/oracle_metrics_password
+```
+
+### Security note
+
+Enable `METRICS_AUTH_USERNAME` / `METRICS_AUTH_PASSWORD` in every production
+deployment. Without them, anyone who can reach the service can read match
+counts, error rates, and RPC latency, which is useful reconnaissance for an
+attacker. If the endpoint must stay unauthenticated, restrict access at the
+network layer (firewall, private network, or reverse proxy) instead.
 
 ## Security Notes
 

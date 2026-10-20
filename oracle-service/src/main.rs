@@ -22,13 +22,13 @@
 
 use axum::{
     extract::State,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use oracle_service::{
@@ -51,6 +51,15 @@ struct AppState {
     health_checker: Arc<HealthChecker>,
     rate_limiter: RateLimitState,
     waf: WafState,
+    /// Optional HTTP Basic Auth credentials for the `/metrics` endpoint.
+    /// When `None`, the endpoint is left open for backward compatibility.
+    metrics_auth: Option<Arc<MetricsAuth>>,
+}
+
+/// Credentials guarding the `/metrics` scrape endpoint.
+struct MetricsAuth {
+    username: String,
+    password: String,
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
@@ -71,7 +80,29 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 /// Exposes `oracle_queue_depth` and `oracle_dead_letter_count` gauges (plus
 /// standard process metrics when the `process` feature is enabled) in the
 /// text/plain; version=0.0.4 format expected by Prometheus.
-async fn metrics_handler() -> Response {
+///
+/// When `ORACLE_METRICS_AUTH_USERNAME` / `ORACLE_METRICS_AUTH_PASSWORD` are
+/// configured, requests must carry a valid `Authorization: Basic ...` header;
+/// otherwise a `401 Unauthorized` with a `WWW-Authenticate` challenge is
+/// returned. When unset, the endpoint stays open for backward compatibility.
+async fn metrics_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(auth) = state.metrics_auth.as_ref() {
+        let authorized = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| metrics::check_basic_auth(value, &auth.username, &auth.password))
+            .unwrap_or(false);
+
+        if !authorized {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Basic realm=\"metrics\"")],
+                "Unauthorized",
+            )
+                .into_response();
+        }
+    }
+
     let body = metrics::render();
     (
         [(
@@ -139,6 +170,30 @@ async fn main() {
     let reconciliation_interval = cfg.reconciliation_interval_secs;
     let http_addr = cfg.http_addr.clone();
 
+    // ── Optional Basic Auth for /metrics ──────────────────────────────────
+    // Both vars must be set for auth to be enabled; a partial configuration
+    // is treated as disabled (with a warning) to avoid locking out scrapers.
+    let metrics_auth = match (
+        cfg.metrics_auth_username.clone(),
+        cfg.metrics_auth_password.clone(),
+    ) {
+        (Some(username), Some(password)) => {
+            info!("metrics endpoint authentication enabled (user: {})", username);
+            Some(Arc::new(MetricsAuth { username, password }))
+        }
+        (None, None) => {
+            info!("metrics endpoint authentication disabled");
+            None
+        }
+        _ => {
+            warn!(
+                "only one of ORACLE_METRICS_AUTH_USERNAME / ORACLE_METRICS_AUTH_PASSWORD is set; \
+                 metrics endpoint authentication disabled"
+            );
+            None
+        }
+    };
+
     // ── Initialize dependencies ───────────────────────────────────────────
     let soroban = match SorobanClient::new(
         cfg.rpc_url.clone(),
@@ -190,6 +245,7 @@ async fn main() {
         health_checker: health_checker.clone(),
         rate_limiter: RateLimitState::new(),
         waf: WafState::new(),
+        metrics_auth,
     };
 
     // WAF is layered outermost so its burst/body/URI checks reject bad
