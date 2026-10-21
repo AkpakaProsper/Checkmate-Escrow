@@ -5,7 +5,7 @@
 This document is the exhaustive, user-facing reference for every error a
 caller can receive from the two on-chain Soroban contracts in this repo:
 
-- [`EscrowContract`](../contracts/escrow/src/lib.rs) — [`contracts/escrow/src/errors.rs`](../contracts/escrow/src/errors.rs) (52 variants)
+- [`EscrowContract`](../contracts/escrow/src/lib.rs) — [`contracts/escrow/src/errors.rs`](../contracts/escrow/src/errors.rs) (53 variants)
 - [`OracleContract`](../contracts/oracle/src/lib.rs) — [`contracts/oracle/src/errors.rs`](../contracts/oracle/src/errors.rs) (27 variants)
 
 Every variant defined in those two files is documented below. If you add,
@@ -149,6 +149,7 @@ These error codes support advanced features including dispute resolution, stakin
 | 54 | `NotAnOracle` | v0.1.0 | [`submit_result_with_oracle_record`](../contracts/escrow/src/lib.rs), oracle-gated functions | The caller is not a registered oracle address. Distinct from `Unauthorized` (#4) — `#54` is returned specifically when the caller has valid auth credentials but is not on the oracle registry. | Verify the signing key is a registered oracle address via `get_oracle_address`. If the oracle address was rotated, admin must call `update_oracle` with the current key. | A new oracle instance with a fresh key pair submits a result without first having the admin register it via `update_oracle` → `#54`. |
 | 55 | `DepositInProgress` | v0.1.0 | [`deposit`](../contracts/escrow/src/lib.rs) | A deposit for this match is already in progress — the reentrancy guard tripped. A concurrent or re-entrant deposit call attempted to deposit while another deposit for the same match was still executing. | Do not submit multiple concurrent deposit calls for the same match ID. Retry after the first call completes. | Two parallel oracle service instances both call `deposit` for match 42 at the same time → one succeeds, the other gets `#55`. |
 | 56 | `DisputeFallbackNotElapsed` | v0.1.0 | Dispute resolution functions | `resolve_dispute_no_quorum` (or equivalent fallback resolution) was called before the dispute's voting deadline plus the configured grace period has elapsed. The no-quorum fallback path requires both the voting window and the grace period to have passed before it can fire. | Check the dispute's deadline and the configured grace period via `get_dispute`. Wait for both to elapse before retrying the fallback resolution call. | Calling the no-quorum fallback resolver one ledger before the grace period ends → `#56`. |
+| 58 | `UpgradeNotConfirmed` | v0.2.0 | [`execute_upgrade`](../contracts/escrow/src/lib.rs) | `execute_upgrade` was called without a prior `confirm_upgrade` call from a second authorized address. The multi-sig confirmation step is mandatory — a single admin key cannot unilaterally deploy new WASM. | Call `confirm_upgrade(upgrader)` with a separate authorized key after `schedule_upgrade` and before `execute_upgrade`. | Admin schedules an upgrade and immediately tries to execute it without having the upgrader key sign off → `#58`. |
 
 
 ---
@@ -251,6 +252,10 @@ All error codes documented in this file were introduced in v0.1.0. The `Since` c
 **Oracle contract** — codes 1–12 and 14–22 introduced (code 13 is not assigned).
 
 ### v0.2.0 (unreleased)
+
+**Escrow contract**
+
+- Added `#58 UpgradeNotConfirmed` (since v0.2.0) — returned by `execute_upgrade` when `confirm_upgrade` has not been called by a second authorized address after `schedule_upgrade`. Enforces a two-step multi-sig requirement for contract upgrades so that a single compromised admin key cannot unilaterally deploy arbitrary WASM.
 
 **Oracle contract**
 

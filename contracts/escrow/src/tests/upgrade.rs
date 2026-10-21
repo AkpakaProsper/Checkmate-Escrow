@@ -4,7 +4,8 @@
 /// - `get_version` — returns the correct initial version.
 /// - `schedule_upgrade` — admin-gated, emits event, stores keys.
 /// - `cancel_upgrade`   — removes pending-upgrade keys.
-/// - `execute_upgrade`  — enforces paused + review-period constraints.
+/// - `confirm_upgrade`  — records a second-signer confirmation.
+/// - `execute_upgrade`  — enforces paused + review-period + confirmation constraints.
 /// - `migrate_state`    — version guard, incremental migrations, idempotency.
 /// - `validate_state`   — detects a healthy vs. corrupt instance store.
 use super::*;
@@ -128,6 +129,104 @@ fn test_cancel_upgrade_when_none_pending_is_rejected() {
     );
 }
 
+// ── confirm_upgrade ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_confirm_upgrade_succeeds_with_any_authorized_address() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.schedule_upgrade(&dummy_wasm_hash(&env));
+
+    let upgrader = Address::generate(&env);
+    // No panic → confirmation accepted.
+    client.confirm_upgrade(&upgrader);
+}
+
+#[test]
+fn test_confirm_upgrade_without_scheduled_upgrade_is_rejected() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let upgrader = Address::generate(&env);
+    let result = client.try_confirm_upgrade(&upgrader);
+    assert!(
+        matches!(result, Err(Ok(Error::UpgradeNotScheduled))),
+        "confirm_upgrade with no pending upgrade must return UpgradeNotScheduled"
+    );
+}
+
+#[test]
+fn test_confirm_upgrade_emits_event() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.schedule_upgrade(&dummy_wasm_hash(&env));
+
+    let upgrader = Address::generate(&env);
+    client.confirm_upgrade(&upgrader);
+
+    let events = env.events().all();
+    let found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0 = topics.get(0).unwrap();
+        let t1 = topics.get(1).unwrap();
+        let s0 = Symbol::try_from_val(&env, &t0).ok();
+        let s1 = Symbol::try_from_val(&env, &t1).ok();
+        s0 == Some(Symbol::new(&env, "upgrade")) && s1 == Some(symbol_short!("confirm"))
+    });
+    assert!(found, "confirm_upgrade must emit (upgrade, confirm) event");
+}
+
+#[test]
+fn test_execute_upgrade_rejected_without_confirmation() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.schedule_upgrade(&dummy_wasm_hash(&env));
+    client.pause(&admin);
+
+    // Advance past the review period but do NOT call confirm_upgrade.
+    env.ledger().with_mut(|l| {
+        l.sequence_number += crate::UPGRADE_REVIEW_PERIOD_LEDGERS + 1;
+    });
+
+    let result = client.try_execute_upgrade();
+    assert!(
+        matches!(result, Err(Ok(Error::UpgradeNotConfirmed))),
+        "execute_upgrade without prior confirm_upgrade must return UpgradeNotConfirmed"
+    );
+}
+
+#[test]
+fn test_cancel_upgrade_clears_confirmation() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // Schedule, confirm, then cancel.
+    client.schedule_upgrade(&dummy_wasm_hash(&env));
+    let upgrader = Address::generate(&env);
+    client.confirm_upgrade(&upgrader);
+    client.cancel_upgrade();
+
+    // Re-schedule a new upgrade — the old confirmation must not carry over.
+    client.schedule_upgrade(&dummy_wasm_hash(&env));
+    client.pause(&admin);
+
+    env.ledger().with_mut(|l| {
+        l.sequence_number += crate::UPGRADE_REVIEW_PERIOD_LEDGERS + 1;
+    });
+
+    let result = client.try_execute_upgrade();
+    assert!(
+        matches!(result, Err(Ok(Error::UpgradeNotConfirmed))),
+        "confirmation from a cancelled upgrade must not carry over to the next upgrade"
+    );
+}
+
 // ── execute_upgrade ───────────────────────────────────────────────────────────
 
 #[test]
@@ -174,6 +273,10 @@ fn test_execute_upgrade_succeeds_after_review_period() {
     client.schedule_upgrade(&dummy_wasm_hash(&env));
     client.pause(&admin);
 
+    // Provide the required multi-sig confirmation before execution.
+    let upgrader = Address::generate(&env);
+    client.confirm_upgrade(&upgrader);
+
     // Advance past the review period.
     env.ledger().with_mut(|l| {
         l.sequence_number += crate::UPGRADE_REVIEW_PERIOD_LEDGERS + 1;
@@ -187,6 +290,10 @@ fn test_execute_upgrade_succeeds_after_review_period() {
     assert!(
         !matches!(result, Err(Ok(Error::UpgradeReviewPeriodNotElapsed))),
         "execute_upgrade after the review period must not return UpgradeReviewPeriodNotElapsed"
+    );
+    assert!(
+        !matches!(result, Err(Ok(Error::UpgradeNotConfirmed))),
+        "execute_upgrade after confirm_upgrade must not return UpgradeNotConfirmed"
     );
 }
 

@@ -431,3 +431,162 @@ See `src/tests/dispute.rs` for comprehensive test suite.
 4. **Dispute Appeals**: Secondary appeal phase with higher quorum
 5. **Treasury Management**: Accumulated bonds used for rewards/incentives
 6. **Governance Token**: Voting weight based on separate governance token, not match stake tokens
+
+## Fallback Resolution (No-Quorum Path)
+
+### Current Behavior: Explicit Pending State
+
+When the voting window closes and **quorum is not met**, the dispute **does not automatically resolve**. Instead:
+
+1. **`resolve_dispute_by_vote` returns `Error::QuorumNotMet`** — an explicit error, not a silent failure
+2. **Match remains in `PendingResult` state** — funds are not locked indefinitely; escrow balance stays intact
+3. **Dispute stays `Active`** — the dispute can be retried if votes arrive, or escalated
+4. **No bond movement** — dispute bond is neither refunded nor forfeited until final resolution
+
+This design prevents the "locked funds" bug where a match with zero votes would permanently trap escrow tokens.
+
+### Manual Intervention Options
+
+When `QuorumNotMet` occurs, off-chain tooling or admins can:
+
+| Option | Action | Effect |
+|--------|--------|--------|
+| **Extend voting period** | `set_dispute_period(new_period)` | Reopens voting window for more participation |
+| **Reduce quorum threshold** | `set_quorum_basis_points(lower_value)` | Lowers participation requirement |
+| **Manual resolution** | Admin calls `resolve_dispute_by_vote` after adjusting config | Forces resolution with new parameters |
+| **Wait for organic votes** | No action; voters may still cast ballots before deadline | Automatic resolution if quorum met naturally |
+
+### Planned: Grace Period Fallback Resolution
+
+The error code `DisputeFallbackNotElapsed` (Error 56) reserves space for a future **automatic fallback mechanism**:
+
+> *"The dispute's voting deadline plus grace period has not yet elapsed, so the no-quorum fallback resolution cannot be applied yet."*
+
+**Proposed Design** (not yet implemented):
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    DISPUTE TIMELINE                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Dispute Opened                                                │
+│        │                                                        │
+│        ▼                                                        │
+│   Voting Period (configurable, default ~200 ledgers)            │
+│        │                                                        │
+│        ▼                                                        │
+│   Voting Deadline                                               │
+│        │                                                        │
+│        ▼                                                        │
+│   Grace Period (new parameter: `DisputeFallbackGracePeriod`)    │
+│        │                                                        │
+│        ▼                                                        │
+│   Fallback Resolution Triggered                                 │
+│        │                                                        │
+│        ├─► If quorum MET: normal resolution (Overturned/Upheld) │
+│        │                                                        │
+│        └─► If quorum NOT MET: fallback to ORACLE RESULT         │
+│             (original oracle decision stands, bond forfeited)   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Rationale for Oracle-Default Fallback**:
+- Avoids permanent fund lockup without admin intervention
+- Preserves oracle authority as the original decision-maker
+- Disputer forfeits bond (penalty for raising dispute without community support)
+- Oracle slashing signal **not** emitted (no community overturn)
+
+**New Configuration Parameters** (planned):
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `DisputeFallbackGracePeriod` | Ledgers after voting deadline before fallback triggers | 50 (~4 min) |
+| `FallbackToOracleResult` | Boolean: whether fallback defaults to oracle outcome | true |
+
+**New Entrypoint** (planned):
+```rust
+/// Resolve dispute via fallback when grace period has elapsed.
+/// Callable by anyone after `voting_deadline + fallback_grace_period`.
+pub fn resolve_dispute_fallback(env: Env, dispute_id: u64) -> Result<(), Error> {
+    // 1. Verify dispute is Active
+    // 2. Verify env.ledger().sequence() >= dispute.voting_deadline + fallback_grace_period
+    // 3. If quorum met: normal resolution (Overturned/Upheld)
+    // 4. If quorum NOT met: fallback to oracle result (Upheld), bond forfeited
+    // 5. NO oracle slash signal on fallback
+}
+```
+
+**Error Handling**:
+- `DisputeFallbackNotElapsed`: Called before grace period expires
+- `QuorumNotMet`: Returned by `resolve_dispute_by_vote` if called prematurely
+- `InvalidState`: Dispute not in `Active` state
+
+### Sequence Diagram: Fallback Flow
+
+```mermaid
+sequenceDiagram
+    participant D as Disputer
+    participant V as Voters
+    participant C as Contract
+    participant O as Oracle
+    participant A as Admin/Off-chain
+
+    D->>C: dispute_oracle_result(evidence, bond)
+    C-->>D: dispute_id, voting_deadline
+
+    loop Voting Period
+        V->>C: vote_on_dispute(dispute_id, yes/no)
+    end
+
+    alt Quorum Met Before Deadline
+        A->>C: resolve_dispute_by_vote(dispute_id)
+        C-->>A: Overturned/Upheld
+    else Quorum NOT Met at Deadline
+        C-->>A: Error::QuorumNotMet
+        Note over A: Manual intervention or wait for grace period
+    end
+
+    Note over C: Grace Period Elapses (voting_deadline + fallback_grace_period)
+
+    A->>C: resolve_dispute_fallback(dispute_id)
+    alt Quorum Now Met
+        C-->>A: Normal resolution
+    else Quorum Still Not Met
+        C-->>A: Fallback: Oracle Result (Upheld), Bond Forfeited
+        C->>O: NO slash signal (community did not overturn)
+    end
+```
+
+### Implementation Checklist
+
+When implementing the fallback mechanism:
+
+- [ ] Add `DisputeFallbackGracePeriod` to `ProtocolConfig`
+- [ ] Add getter/setter: `get_fallback_grace_period` / `set_fallback_grace_period`
+- [ ] Implement `resolve_dispute_fallback` entrypoint
+- [ ] Add `DisputeFallbackGracePeriod` to `set_config` admin function
+- [ ] Add integration test: zero-vote dispute → fallback after grace period
+- [ ] Update off-chain tooling to call fallback after grace period
+- [ ] Document in API reference and deployment guide
+
+### Off-Chain Tooling Integration
+
+Current off-chain indexer should track:
+- Disputes with `QuorumNotMet` errors
+- Time remaining until fallback grace period expires
+- Auto-trigger `resolve_dispute_fallback` when eligible
+
+Example polling logic:
+```python
+def check_fallback_eligible(dispute):
+    grace_period = get_fallback_grace_period()
+    return (current_ledger() >= dispute.voting_deadline + grace_period 
+            and dispute.state == Active)
+
+# Cron job runs every ledger or minute
+for dispute in get_active_disputes():
+    if check_fallback_eligible(dispute):
+        call_resolve_dispute_fallback(dispute.id)
+```
+

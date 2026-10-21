@@ -372,7 +372,11 @@ Snapshots are recorded automatically at key lifecycle transitions:
 - **`Completed`** — when `submit_result` executes the payout
 - **`Cancelled`** — when cancellation occurs (before or after activation)
 
-The ring buffer has a fixed capacity of `MAX_SNAPSHOTS_PER_MATCH = 8` slots per match. Snapshots are stored at keys `DataKey::Snapshot(match_id, slot)` where `slot = index % MAX_SNAPSHOTS_PER_MATCH`. When the buffer fills, the oldest entry is silently overwritten — this is the storage-pruning mechanism.
+The ring buffer has a fixed capacity of `MAX_SNAPSHOTS_PER_MATCH = 8` slots per match. Snapshots are stored at keys `DataKey::Snapshot(match_id, slot)` where `slot = index % MAX_SNAPSHOTS_PER_MATCH`.
+
+**Wrap-around behaviour:** Once all 8 slots for a match are occupied, recording a new snapshot recycles the slot holding the oldest entry (`slot = new_index % MAX_SNAPSHOTS_PER_MATCH`), overwriting it. The overwritten snapshot is permanently lost from on-chain storage; only the monotonically increasing `index` values of the retained snapshots reveal that pruning occurred. This is the storage-pruning mechanism.
+
+**Detecting data loss off-chain:** Every time a slot is recycled, the contract emits a `match/snapshot_overwritten` event with the topics `("match", "snapshot_overwritten")` and the payload `(match_id: u64, overwritten_index: u32, new_index: u32)`, where `overwritten_index` is the `index` of the snapshot that was discarded and `new_index` is the `index` of the snapshot that replaced it. Off-chain indexers should subscribe to this event to detect that a previously observed snapshot is no longer retrievable via `get_balance_snapshots` and to reconcile their own retained history. No event is emitted while the buffer still has free slots.
 
 **Interpreting the `index` field:** The `index` is monotonically increasing and never resets, enabling callers to detect when pruning has occurred. If `get_balance_snapshots` returns snapshots with indices like `[5, 6, 7, 8]`, you know snapshots `0` through `4` were pruned because only 8 slots are retained. The `SnapshotCount(match_id)` tracks the total ever recorded, allowing calculation of the actual sequence range.
 

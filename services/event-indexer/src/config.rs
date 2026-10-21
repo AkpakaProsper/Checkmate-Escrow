@@ -61,6 +61,11 @@ pub struct Config {
 
     // ── Polling ───────────────────────────────────────────────────────────
     pub poll_interval_secs: u64,
+    /// Fallback start ledger for cursor rollover recovery.
+    /// When the stored RPC cursor becomes invalid (network upgrade, archival window),
+    /// the indexer will fall back to re-indexing from this ledger.
+    /// Defaults to 0 (genesis) if not set.
+    pub fallback_start_ledger: u32,
 
     // ── Logging ───────────────────────────────────────────────────────────
     pub log_level: String,
@@ -186,6 +191,10 @@ impl Config {
 
         // ── Polling ───────────────────────────────────────────────────────
         let poll_interval_secs = env::var("EVENT_INDEXER_POLL_INTERVAL")
+        // ── Fallback ─────────────────────────────────────────────────────
+        let fallback_start_ledger = env::var("EVENT_INDEXER_FALLBACK_START_LEDGER")
+            .unwrap_or_else(|_| "0".to_string())
+            .parse::<u32>()?;
             .unwrap_or_else(|_| "5".to_string())
             .parse::<u64>()?;
 
@@ -219,6 +228,7 @@ impl Config {
             cache_size,
             redis_url,
             poll_interval_secs,
+            fallback_start_ledger,
             log_level,
         })
     }

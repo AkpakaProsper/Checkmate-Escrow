@@ -48,7 +48,7 @@ use types::{
     DisputeState, FeeTier, Match, MatchState, OracleRotationState, PendingAdminProposal,
     PendingOracleRotation, Platform, PlatformStats, PlayerBalanceSnapshot, PlayerFreezeKey,
     PlayerRating, PlayerRatingKey, PlayerStats, PlayerTier, ProtocolConfig, SnapshotReason,
-    TempOracleRotation, TokenSymbolCacheKey, Winner,
+    TempOracleRotation, TokenSymbolCacheKey, UpgradeKey, Winner,
 };
 
 /// ~30 days at 5s/ledger. Used as the default TTL and expiration threshold.
@@ -4832,9 +4832,14 @@ impl EscrowContract {
     /// Snapshots are stored in a fixed-size ring buffer keyed by
     /// `DataKey::Snapshot(match_id, slot)` where `slot = index %
     /// MAX_SNAPSHOTS_PER_MATCH`. Once a match's snapshot count exceeds the
-    /// buffer capacity, the oldest entry is silently overwritten — this is
-    /// the storage-pruning mechanism. `DataKey::SnapshotCount` tracks the
-    /// total ever recorded so callers can detect that pruning occurred.
+    /// buffer capacity, the oldest entry is overwritten — this is the
+    /// storage-pruning mechanism. `DataKey::SnapshotCount` tracks the total
+    /// ever recorded so callers can detect that pruning occurred.
+    ///
+    /// Overwrites are no longer silent: when a slot is recycled, a
+    /// `("match", "snapshot_overwritten")` event is published with
+    /// `(match_id, overwritten_index, new_index)` before the slot is
+    /// rewritten, so off-chain indexers can detect the data loss.
     fn record_snapshot(env: &Env, m: &Match, reason: SnapshotReason) {
         let token_symbol = Self::fetch_token_symbol(env, &m.token);
         let escrow_balance = Self::escrow_balance_of(m);
@@ -4845,6 +4850,25 @@ impl EscrowContract {
             .get(&DataKey::SnapshotCount(m.id))
             .unwrap_or(0);
         let slot = index % MAX_SNAPSHOTS_PER_MATCH;
+
+        // Detect ring-buffer wrap-around: if this slot already holds a
+        // snapshot, it is about to be recycled. Report the overwritten
+        // entry's index so indexers can account for the lost snapshot.
+        if index >= MAX_SNAPSHOTS_PER_MATCH {
+            let overwritten_index = env
+                .storage()
+                .persistent()
+                .get::<DataKey, BalanceSnapshot>(&DataKey::Snapshot(m.id, slot))
+                .map(|old| old.index)
+                .unwrap_or(index.saturating_sub(MAX_SNAPSHOTS_PER_MATCH));
+            env.events().publish(
+                (
+                    Symbol::new(env, "match"),
+                    symbol_short!("snap_ovr"),
+                ),
+                (m.id, overwritten_index, index),
+            );
+        }
 
         let nonce: BytesN<32> = env.prng().gen();
         let commitment = Self::compute_commitment(env, m.stake_amount, escrow_balance, &nonce);
@@ -6124,9 +6148,50 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
+        // Clear any confirmation recorded by confirm_upgrade so it cannot
+        // carry over to a subsequent upgrade cycle.
+        env.storage().instance().remove(&UpgradeKey::ConfirmedBy);
 
         env.events()
             .publish((Symbol::new(&env, "upgrade"), symbol_short!("cancel")), ());
+
+        Ok(())
+    }
+
+    /// Confirm a pending upgrade as a second authorized signer (multi-sig step).
+    ///
+    /// A separate `upgrader` address (distinct from the admin that called
+    /// `schedule_upgrade`) must call this function to attest that the pending
+    /// WASM hash has been independently reviewed and approved. `execute_upgrade`
+    /// will be rejected with `UpgradeNotConfirmed` until this confirmation is on
+    /// record.
+    ///
+    /// The upgrader is any address passed in and authorized via `require_auth`.
+    /// In production this should be a hardware-wallet address or a second
+    /// signing key that is kept separate from the admin key so that a single
+    /// compromised key cannot alone deploy arbitrary code.
+    ///
+    /// # Arguments
+    /// * `upgrader` — the address providing the second-factor confirmation.
+    ///
+    /// # Errors
+    /// * `UpgradeNotScheduled` — no upgrade is pending (nothing to confirm).
+    pub fn confirm_upgrade(env: Env, upgrader: Address) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+        upgrader.require_auth();
+
+        if !env.storage().instance().has(&DataKey::UpgradeScheduledAt) {
+            return Err(Error::UpgradeNotScheduled);
+        }
+
+        env.storage()
+            .instance()
+            .set(&UpgradeKey::ConfirmedBy, &upgrader);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade"), symbol_short!("confirm")),
+            upgrader,
+        );
 
         Ok(())
     }
@@ -6142,9 +6207,14 @@ impl EscrowContract {
     /// state-mutating transactions run against the old schema while the
     /// replacement WASM is being applied.
     ///
+    /// A second authorized address must have called `confirm_upgrade` after
+    /// `schedule_upgrade` was issued. This two-step requirement means that a
+    /// single compromised admin key cannot unilaterally deploy arbitrary code.
+    ///
     /// # Errors
     /// * `UpgradeNotScheduled`            — no upgrade is pending.
     /// * `UpgradeReviewPeriodNotElapsed`  — 7-day review period has not passed.
+    /// * `UpgradeNotConfirmed`            — `confirm_upgrade` has not been called.
     /// * `InvalidPauseState`              — contract is not paused.
     /// * `Unauthorized`                   — caller is not the admin.
     pub fn execute_upgrade(env: Env) -> Result<(), Error> {
@@ -6177,6 +6247,12 @@ impl EscrowContract {
             return Err(Error::UpgradeReviewPeriodNotElapsed);
         }
 
+        // Enforce multi-sig confirmation: a second authorized address must have
+        // called confirm_upgrade before execution is permitted.
+        if !env.storage().instance().has(&UpgradeKey::ConfirmedBy) {
+            return Err(Error::UpgradeNotConfirmed);
+        }
+
         let new_wasm_hash: BytesN<32> = env
             .storage()
             .instance()
@@ -6191,6 +6267,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
+        // Clear the confirmation so it cannot carry over to a future upgrade.
+        env.storage().instance().remove(&UpgradeKey::ConfirmedBy);
 
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());

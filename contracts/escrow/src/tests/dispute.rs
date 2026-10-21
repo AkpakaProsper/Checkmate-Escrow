@@ -1001,7 +1001,7 @@ fn test_dispute_bond_forfeited_on_upheld() {
         client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
 
     let player2_before = token_client.balance(&player2);
-    let _treasury_before = token_client.balance(&admin); // Admin is also treasury in tests
+    let treasury_before = token_client.balance(&admin);
 
     // Only player1 votes to uphold
     client.vote_on_dispute(&dispute_id, &player1, &false);
@@ -1013,6 +1013,7 @@ fn test_dispute_bond_forfeited_on_upheld() {
     // Bond should be forfeited (not refunded to disputer)
     let player2_after = token_client.balance(&player2);
     assert_eq!(player2_after, player2_before); // Not refunded
+    assert_eq!(token_client.balance(&admin), treasury_before + 1);
 }
 
 // ── Governance: Snapshot voting & flash-loan prevention ──────────────────

@@ -37,6 +37,8 @@ pub enum Error {
     InvalidGameId = 15,
     InvalidPlayers = 16,
     TokenNotAllowed = 17,
+    /// An address argument is invalid. Returned by `add_allowed_token` (and other
+    /// address-taking admin functions) when the supplied address is the zero address.
     InvalidAddress = 18,
     MatchAlreadyActive = 19,
     InvalidTimeout = 20,
@@ -86,4 +88,8 @@ pub enum Error {
     /// `set_dispute_period`, `set_minimum_hold_duration`, and `set_fee_tiers`
     /// when the supplied value is above the configured maximum.
     ConfigValueTooHigh = 57,
+    /// `execute_upgrade` requires a second authorized address to have called
+    /// `confirm_upgrade` after `schedule_upgrade`. This error is returned when
+    /// no confirmation has been recorded for the pending upgrade hash.
+    UpgradeNotConfirmed = 58,
 }
