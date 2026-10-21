@@ -384,6 +384,60 @@ fn test_snapshot_ring_buffer_prunes_oldest_entries() {
 }
 
 #[test]
+fn test_snapshot_ring_buffer_emits_overwrite_event() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = client.create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "e7c4a2b1"),
+        &Platform::Lichess,
+    );
+
+    // Fill the ring buffer exactly to capacity (the Created snapshot already
+    // occupies slot 0), then perform one more write to force a wrap-around.
+    env.as_contract(&contract_id, || {
+        let m: Match = env.storage().persistent().get(&DataKey::Match(id)).unwrap();
+        for _ in 1..MAX_SNAPSHOTS_PER_MATCH {
+            EscrowContract::record_snapshot(&env, &m, SnapshotReason::Deposit);
+        }
+    });
+
+    let events_before = env.events().all().len();
+
+    env.as_contract(&contract_id, || {
+        let m: Match = env.storage().persistent().get(&DataKey::Match(id)).unwrap();
+        EscrowContract::record_snapshot(&env, &m, SnapshotReason::Deposit);
+    });
+
+    let all_events = env.events().all();
+    assert_eq!(
+        all_events.len(),
+        events_before + 1,
+        "exactly one event must be emitted on the wrap-around write"
+    );
+
+    let (emitting_contract, topics, _data) = all_events.get(all_events.len() - 1).unwrap();
+    assert_eq!(emitting_contract, contract_id);
+
+    let expected_topics = (
+        Symbol::new(&env, "match"),
+        Symbol::new(&env, "snapshot_overwritten"),
+    )
+        .into_val(&env);
+    assert_eq!(topics, expected_topics);
+
+    // The overwritten slot is index 0 (the Created snapshot); the new
+    // snapshot lands at index MAX_SNAPSHOTS_PER_MATCH.
+    let (overwritten_index, new_index): (u32, u32) = TryFromVal::try_from_val(&env, &_data).unwrap();
+    assert_eq!(overwritten_index, 0);
+    assert_eq!(new_index, MAX_SNAPSHOTS_PER_MATCH);
+}
+
+#[test]
 fn test_get_balance_snapshots_empty_for_match_with_no_recorded_history() {
     // Defensive case: if SnapshotCount were ever absent for an existing match,
     // queries should degrade to an empty list rather than panicking.
