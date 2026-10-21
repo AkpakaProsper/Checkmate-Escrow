@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+<!-- Re-PR: changelog update -->
+
 
 [!NOTE] Added retrospective entries for major features since v0.1.0: oracle consensus, vesting, disputes, player freeze. Closes #1777.
 
@@ -47,3 +48,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [Unreleased]: https://github.com/your-org/Checkmate-Escrow/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/your-org/Checkmate-Escrow/releases/tag/v1.0.0
+# Re-PR for changelog
