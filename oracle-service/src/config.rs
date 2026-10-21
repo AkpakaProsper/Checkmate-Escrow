@@ -116,6 +116,15 @@ pub struct OracleConfig {
     /// HTTP server bind address (host:port).
     /// Defaults to `ORACLE_HTTP_ADDR` env var, or `0.0.0.0:8000` if unset.
     pub http_addr: String,
+
+    // ---- Metrics authentication ----
+    /// Optional HTTP Basic Auth username for the `/metrics` endpoint.
+    /// Loaded from `METRICS_AUTH_USERNAME`; empty strings are treated as unset.
+    /// When both username and password are set, `/metrics` requires Basic Auth.
+    pub metrics_auth_username: Option<String>,
+    /// Optional HTTP Basic Auth password for the `/metrics` endpoint.
+    /// Loaded from `METRICS_AUTH_PASSWORD`; empty strings are treated as unset.
+    pub metrics_auth_password: Option<String>,
 }
 
 impl fmt::Debug for OracleConfig {
@@ -150,6 +159,11 @@ impl fmt::Debug for OracleConfig {
             .field("dead_letter_max_entries", &self.dead_letter_max_entries)
             .field("max_fee_stroops", &self.max_fee_stroops)
             .field("http_addr", &self.http_addr)
+            .field(
+                "metrics_auth_username",
+                &self.metrics_auth_username.as_deref().map(|_| "<set>"),
+            )
+            .field("metrics_auth_password", &"<redacted>")
             .finish()
     }
 }
@@ -190,6 +204,11 @@ pub enum ConfigError {
 ///   [`crate::middleware::ip_allowlist`].
 /// - `ORACLE_ENV` — set to `production` to enforce HTTPS-only
 ///   `STELLAR_RPC_URL` at [`crate::soroban_client::SorobanClient`] startup.
+/// - `METRICS_AUTH_USERNAME` — optional HTTP Basic Auth username for the
+///   `/metrics` endpoint. Empty strings are treated as unset.
+/// - `METRICS_AUTH_PASSWORD` — optional HTTP Basic Auth password for the
+///   `/metrics` endpoint. Empty strings are treated as unset. When both
+///   username and password are set, `/metrics` requires Basic Auth.
 pub fn load() -> Result<OracleConfig, ConfigError> {
     let rpc_url = require_env("STELLAR_RPC_URL")?;
 
@@ -250,6 +269,13 @@ pub fn load() -> Result<OracleConfig, ConfigError> {
     let max_fee_stroops = parse_u32_env("ORACLE_MAX_FEE_STROOPS", 1_000_000)?;
     let http_addr = std::env::var("ORACLE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8000".to_string());
 
+    let metrics_auth_username = std::env::var("METRICS_AUTH_USERNAME")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let metrics_auth_password = std::env::var("METRICS_AUTH_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
+
     Ok(OracleConfig {
         rpc_url,
         network_passphrase,
@@ -268,6 +294,8 @@ pub fn load() -> Result<OracleConfig, ConfigError> {
         dead_letter_max_entries,
         max_fee_stroops,
         http_addr,
+        metrics_auth_username,
+        metrics_auth_password,
     })
 }
 
