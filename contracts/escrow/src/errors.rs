@@ -37,6 +37,8 @@ pub enum Error {
     InvalidGameId = 15,
     InvalidPlayers = 16,
     TokenNotAllowed = 17,
+    /// An address argument is invalid. Returned by `add_allowed_token` (and other
+    /// address-taking admin functions) when the supplied address is the zero address.
     InvalidAddress = 18,
     MatchAlreadyActive = 19,
     InvalidTimeout = 20,
