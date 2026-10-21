@@ -2,10 +2,11 @@
 //!
 //! ## Exposed metrics
 //!
-//! | Metric name                | Type  | Description                                             |
-//! |----------------------------|-------|---------------------------------------------------------|
-//! | `oracle_queue_depth`       | Gauge | Number of entries currently in the pending-verification queue. |
-//! | `oracle_dead_letter_count` | Gauge | Total entries sitting in the dead-letter store.         |
+//! | Metric name                | Type    | Description                                             |
+//! |----------------------------|---------|---------------------------------------------------------|
+//! | `oracle_queue_depth`       | Gauge   | Number of entries currently in the pending-verification queue. |
+//! | `oracle_dead_letter_count` | Gauge   | Total entries sitting in the dead-letter store.         |
+//! | `oracle_slash_total`       | Counter | Cumulative oracle slash events processed by the relay.  |
 //!
 //! All metrics are registered on the default Prometheus registry and served at
 //! `GET /metrics` in the text/plain exposition format understood by Prometheus
@@ -13,12 +14,13 @@
 //!
 //! ## Usage
 //!
-//! Call [`set_queue_depth`] on every poller tick after loading the queue, and
-//! call [`set_dead_letter_count`] after any write to the dead-letter store.
+//! Call [`set_queue_depth`] on every poller tick after loading the queue,
+//! call [`set_dead_letter_count`] after any write to the dead-letter store, and
+//! call [`increment_slash_total`] each time the slash relay confirms a new slash.
 
 use base64::Engine;
 use once_cell::sync::Lazy;
-use prometheus::{register_gauge, Gauge, TextEncoder};
+use prometheus::{register_counter, register_gauge, Counter, Gauge, TextEncoder};
 use subtle::ConstantTimeEq;
 
 /// Gauge: number of entries in the pending-verification queue.
@@ -45,6 +47,20 @@ pub static ORACLE_DEAD_LETTER_COUNT: Lazy<Gauge> = Lazy::new(|| {
     .expect("failed to register oracle_dead_letter_count gauge")
 });
 
+/// Counter: total number of oracle slash events processed by this service.
+///
+/// Incremented every time the relay processes an `oracle/slash` contract event
+/// (i.e. a `finalize_slash` confirmation from the oracle contract). This counter
+/// provides visibility into how often oracles are being penalised and is the
+/// data source for the **Slash Events** Grafana panel.
+pub static ORACLE_SLASH_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    register_counter!(
+        "oracle_slash_total",
+        "Total number of oracle slash events processed by the relay"
+    )
+    .expect("failed to register oracle_slash_total counter")
+});
+
 /// Set the `oracle_queue_depth` gauge to `n`.
 ///
 /// Called by the poller on every tick and after queue mutations.
@@ -59,6 +75,15 @@ pub fn set_queue_depth(n: usize) {
 #[inline]
 pub fn set_dead_letter_count(n: usize) {
     ORACLE_DEAD_LETTER_COUNT.set(n as f64);
+}
+
+/// Increment the `oracle_slash_total` counter by 1.
+///
+/// Called by the slash relay whenever it confirms a completed `oracle/slash`
+/// event from the oracle contract (i.e. after `finalize_slash` succeeds).
+#[inline]
+pub fn increment_slash_total() {
+    ORACLE_SLASH_TOTAL.inc();
 }
 
 /// Render all registered metrics in the Prometheus text exposition format.

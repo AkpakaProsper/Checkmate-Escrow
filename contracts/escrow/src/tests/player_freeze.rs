@@ -103,7 +103,7 @@ fn test_admin_freeze_player_appears_in_get_frozen_players() {
 
     client.admin_freeze_player(&player1, &reason(&env, "fraud"));
 
-    let list = client.get_frozen_players();
+    let list = client.get_frozen_players(&0, &100);
     assert_eq!(list.len(), 1);
     assert_eq!(list.get(0).unwrap(), player1);
 }
@@ -119,7 +119,7 @@ fn test_admin_freeze_multiple_players() {
     client.admin_freeze_player(&player2, &reason(&env, "r2"));
     client.admin_freeze_player(&player3, &reason(&env, "r3"));
 
-    let list = client.get_frozen_players();
+    let list = client.get_frozen_players(&0, &100);
     assert_eq!(list.len(), 3);
     assert!(client.is_player_frozen(&player1));
     assert!(client.is_player_frozen(&player2));
@@ -134,7 +134,7 @@ fn test_admin_freeze_player_idempotent_no_duplicate_in_list() {
     client.admin_freeze_player(&player1, &reason(&env, "first"));
     client.admin_freeze_player(&player1, &reason(&env, "updated reason"));
 
-    let list = client.get_frozen_players();
+    let list = client.get_frozen_players(&0, &100);
     assert_eq!(
         list.len(),
         1,
@@ -202,7 +202,7 @@ fn test_admin_unfreeze_player_removes_from_list() {
     client.admin_freeze_player(&player2, &reason(&env, "b"));
     client.admin_unfreeze_player(&player1);
 
-    let list = client.get_frozen_players();
+    let list = client.get_frozen_players(&0, &100);
     assert_eq!(list.len(), 1);
     assert_eq!(list.get(0).unwrap(), player2);
     assert!(!client.is_player_frozen(&player1));
@@ -218,7 +218,7 @@ fn test_admin_list_frozen_players_requires_admin_auth() {
     client.admin_freeze_player(&player1, &reason(&env, "audit"));
     env.set_auths(&[]);
 
-    let result = client.try_admin_list_frozen_players(&_admin);
+    let result = client.try_admin_list_frozen_players(&_admin, &0, &100);
     assert!(result.is_err(), "frozen-player audit must require admin auth");
 }
 
@@ -232,7 +232,7 @@ fn test_admin_list_frozen_players_returns_current_ordered_list() {
     client.admin_freeze_player(&player2, &reason(&env, "r2"));
     client.admin_freeze_player(&player3, &reason(&env, "r3"));
 
-    let list = client.admin_list_frozen_players(&admin);
+    let list = client.admin_list_frozen_players(&admin, &0, &100);
     assert_eq!(list.len(), 3);
     assert_eq!(list.get(0).unwrap(), player1);
     assert_eq!(list.get(1).unwrap(), player2);
@@ -489,4 +489,98 @@ fn test_admin_unfreeze_player_restores_cancel_and_claim() {
     client.admin_freeze_player(&player1, &reason(&env, "temp"));
     client.admin_unfreeze_player(&player1);
     client.claim_vested_payout(&claim_id, &player1);
+}
+
+// ── Issue #1764: get_frozen_players pagination / size limit ──────────────────
+
+/// Freezing more than 100 players and paginating through them must return the
+/// correct subset on each page, and the clamped limit of 100 must prevent any
+/// single call from returning more than 100 entries regardless of how large the
+/// full list is.
+#[test]
+fn test_1764_get_frozen_players_pagination_large_list() {
+    let (env, contract_id, _oracle, _player1, _player2, _token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    const TOTAL: u32 = 150;
+
+    // Freeze 150 unique players.
+    let mut players = soroban_sdk::Vec::new(&env);
+    for _ in 0..TOTAL {
+        let p = Address::generate(&env);
+        client.admin_freeze_player(&p, &reason(&env, "bulk-test"));
+        players.push_back(p);
+    }
+
+    // Requesting with limit=100 should return exactly 100 from offset 0.
+    let page_0 = client.get_frozen_players(&0, &100);
+    assert_eq!(
+        page_0.len(),
+        100,
+        "first page with limit=100 must return exactly 100 entries"
+    );
+
+    // Requesting the second page (offset=100, limit=100) should return the
+    // remaining 50 entries.
+    let page_1 = client.get_frozen_players(&100, &100);
+    assert_eq!(
+        page_1.len(),
+        50,
+        "second page (offset=100, limit=100) must return the remaining 50 entries"
+    );
+
+    // Limit clamping: requesting limit=200 is silently capped to 100.
+    let clamped = client.get_frozen_players(&0, &200);
+    assert_eq!(
+        clamped.len(),
+        100,
+        "limit above 100 must be silently clamped to 100"
+    );
+
+    // Pages are non-overlapping: no address appears in both pages.
+    let p0_set: std::vec::Vec<Address> = page_0.iter().collect();
+    for addr in page_1.iter() {
+        assert!(
+            !p0_set.contains(&addr),
+            "pages must not overlap: address {addr:?} appears in both page 0 and page 1"
+        );
+    }
+
+    // Total across two full pages equals TOTAL (150).
+    assert_eq!(
+        page_0.len() + page_1.len(),
+        TOTAL,
+        "pages must cover all frozen players without gaps or overlaps"
+    );
+}
+
+/// An empty offset beyond the list length must return an empty Vec.
+#[test]
+fn test_1764_get_frozen_players_offset_beyond_end() {
+    let (env, contract_id, _oracle, player1, _player2, _token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.admin_freeze_player(&player1, &reason(&env, "test"));
+
+    // Offset=10 with only 1 player — nothing to return.
+    let page = client.get_frozen_players(&10, &100);
+    assert_eq!(
+        page.len(),
+        0,
+        "offset beyond list length must return an empty page"
+    );
+}
+
+/// With zero players frozen, every page must be empty.
+#[test]
+fn test_1764_get_frozen_players_empty_list() {
+    let (env, contract_id, _oracle, _player1, _player2, _token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let page = client.get_frozen_players(&0, &100);
+    assert_eq!(
+        page.len(),
+        0,
+        "get_frozen_players must return empty Vec when no player is frozen"
+    );
 }

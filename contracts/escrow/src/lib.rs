@@ -1065,19 +1065,46 @@ impl EscrowContract {
             .has(&PlayerFreezeKey::FrozenPlayer(player))
     }
 
-    /// Returns all currently frozen player addresses.
-    pub fn get_frozen_players(env: Env) -> soroban_sdk::Vec<Address> {
-        env.storage()
+    /// Returns currently frozen player addresses with pagination.
+    ///
+    /// `offset` is the number of entries to skip (0-based). `limit` caps the
+    /// number of entries returned and is silently clamped to 100 to bound the
+    /// response size. This prevents unbounded reads from the frozen-player
+    /// vector as the list grows.
+    pub fn get_frozen_players(env: Env, offset: u32, limit: u32) -> soroban_sdk::Vec<Address> {
+        extend_instance_ttl(&env);
+        let all: soroban_sdk::Vec<Address> = env
+            .storage()
             .persistent()
             .get(&PlayerFreezeKey::FrozenPlayers)
-            .unwrap_or_else(|| soroban_sdk::vec![&env])
+            .unwrap_or_else(|| soroban_sdk::vec![&env]);
+
+        let capped_limit = if limit > 100 { 100 } else { limit };
+        let mut result = soroban_sdk::vec![&env];
+        let mut count: u32 = 0;
+        for player in all.iter() {
+            if count >= offset + capped_limit {
+                break;
+            }
+            if count >= offset {
+                result.push_back(player);
+            }
+            count += 1;
+        }
+        result
     }
 
-    /// Lists all currently frozen players — admin only.
+    /// Lists currently frozen players with pagination — admin only.
     ///
     /// This authenticated view provides an explicit administrative audit path
     /// without requiring callers to read the contract's persistent storage.
-    pub fn admin_list_frozen_players(env: Env, caller: Address) -> Result<soroban_sdk::Vec<Address>, Error> {
+    /// `offset` and `limit` work the same as `get_frozen_players`.
+    pub fn admin_list_frozen_players(
+        env: Env,
+        caller: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<Address>, Error> {
         extend_instance_ttl(&env);
         let admin: Address = env
             .storage()
@@ -1089,11 +1116,25 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
 
-        Ok(env
+        let all: soroban_sdk::Vec<Address> = env
             .storage()
             .persistent()
             .get(&PlayerFreezeKey::FrozenPlayers)
-            .unwrap_or_else(|| soroban_sdk::vec![&env]))
+            .unwrap_or_else(|| soroban_sdk::vec![&env]);
+
+        let capped_limit = if limit > 100 { 100 } else { limit };
+        let mut result = soroban_sdk::vec![&env];
+        let mut count: u32 = 0;
+        for player in all.iter() {
+            if count >= offset + capped_limit {
+                break;
+            }
+            if count >= offset {
+                result.push_back(player);
+            }
+            count += 1;
+        }
+        Ok(result)
     }
 
     /// Internal helper — rejects `player` with `Error::ContractPaused` when
@@ -2313,6 +2354,16 @@ impl EscrowContract {
     /// Either player can cancel a pending match.
     pub fn cancel_match(env: Env, match_id: u64, caller: Address) -> Result<(), Error> {
         extend_instance_ttl(&env);
+
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
+        }
+
         let mut m: Match = env
             .storage()
             .persistent()

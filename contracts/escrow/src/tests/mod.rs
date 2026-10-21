@@ -26,6 +26,8 @@ mod proptest_fee_tiers;
 mod index;
 mod integration;
 mod invariants;
+mod issue_1724;
+mod issue_1763;
 mod lifecycle;
 mod match_validation;
 mod multi_token;

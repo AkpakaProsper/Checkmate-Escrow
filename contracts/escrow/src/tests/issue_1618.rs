@@ -861,6 +861,51 @@ fn test_1618_self_play_create_match_with_referrer() {
 // ── Rule 10: Duplicate game_id ───────────────────────────────────────────────
 
 #[test]
+fn test_1618_self_play_create_match_with_conversion() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let admin = Address::generate(&env);
+    let player1 = Address::generate(&env);
+
+    let (oracle_client, oracle_id) = register_oracle(&env);
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &escrow_id);
+    client.initialize(&oracle_id, &admin);
+    client.set_protocol_config(&ProtocolConfig {
+        vesting_duration_seconds: 0,
+        cancellation_fee_basis_points: 0,
+        treasury: admin.clone(),
+        stablecoin_only_mode: false,
+        maximum_stake: None,
+        match_timeout_seconds: DEFAULT_MATCH_TIMEOUT_SECONDS,
+        protocol_fee_bps: 0,
+        fee_recipient: admin.clone(),
+        minimum_stake: DEFAULT_MINIMUM_STAKE,
+        max_protocol_fee: None,
+        dispute_bond_tier_schedule: soroban_sdk::vec![&env],
+    });
+
+    let token_a_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_a = token_a_id.address();
+    let token_b_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_b = token_b_id.address();
+
+    StellarAssetClient::new(&env, &token_a).mint(&player1, &1_000);
+
+    assert_eq!(
+        try_create_conversion(
+            &client, &env, &player1, &player1, 50, &token_a, &token_b, "1618ii03",
+            &oracle_client
+        ),
+        Err(Error::InvalidPlayers),
+        "create_match_with_conversion must reject player1 == player2"
+    );
+}
+
+// ── Rule 10: Duplicate game_id ───────────────────────────────────────────────
+
+#[test]
 fn test_1618_duplicate_game_id_create_match() {
     let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);

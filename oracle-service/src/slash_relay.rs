@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::metrics;
+
 /// An oracle slash signal event from the escrow contract.
 /// Tuple: (dispute_id, oracle_address, slash_amount)
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -44,8 +46,14 @@ impl SlashRelay {
     }
 
     /// Mark a signal as processed after successful slashing.
+    /// Also increments the `oracle_slash_total` Prometheus counter so the
+    /// Grafana "Slash Events" panel reflects this new event.
     pub async fn mark_as_processed(&self, signal: SlashSignal) {
-        self.processed_signals.write().await.insert(signal);
+        let inserted = self.processed_signals.write().await.insert(signal);
+        if inserted {
+            // Only count genuinely new signals; do not double-count replays.
+            metrics::increment_slash_total();
+        }
     }
 
     /// Get count of processed signals (for monitoring/testing).
