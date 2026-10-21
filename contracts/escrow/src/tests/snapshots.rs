@@ -32,6 +32,50 @@ fn test_create_match_records_created_snapshot() {
 }
 
 #[test]
+fn test_each_snapshot_reason_round_trips_with_sequential_indices() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = client.create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "reason01"),
+        &Platform::Lichess,
+    );
+    let reasons = std::vec![
+        SnapshotReason::Created,
+        SnapshotReason::Deposit,
+        SnapshotReason::Paused,
+        SnapshotReason::Resumed,
+        SnapshotReason::Completed,
+        SnapshotReason::Cancelled,
+        SnapshotReason::ResultSubmitted,
+        SnapshotReason::Finalized,
+    ];
+
+    env.as_contract(&contract_id, || {
+        let m: Match = env.storage().persistent().get(&DataKey::Match(id)).unwrap();
+        for reason in reasons.iter() {
+            EscrowContract::record_snapshot(&env, &m, reason.clone());
+        }
+    });
+
+    let snapshots = client.get_balance_snapshots(&admin, &id);
+    assert_eq!(snapshots.len(), reasons.len() as u32 + 1);
+
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        assert_eq!(snapshot.index, index as u32);
+    }
+    for (index, reason) in reasons.iter().enumerate() {
+        let snapshot = snapshots.get(index as u32 + 1).unwrap();
+        assert_eq!(snapshot.reason, reason.clone());
+        assert_eq!(snapshot.index, index as u32 + 1);
+    }
+}
+
+#[test]
 fn test_deposit_records_a_snapshot_per_deposit() {
     let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
