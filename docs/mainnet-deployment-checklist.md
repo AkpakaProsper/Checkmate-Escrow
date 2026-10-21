@@ -109,6 +109,10 @@ All items in this section must be complete before the deployment window opens.
   - [ ] USDC or other stablecoin contract addresses have been confirmed with the issuing organisation.
   - [ ] Test transaction using each allowed token has been executed on testnet with the exact mainnet contract addresses.
 - [ ] Match timeout has been set to an appropriate value for mainnet (recommended: 518,400 ledgers / 30 days).
+- [ ] Protocol fee has been decided and documented:
+  - [ ] `protocol_fee_bps` value confirmed (set to `0` if no platform fee is intended).
+  - [ ] `fee_recipient` address confirmed and owned by the platform (required when `protocol_fee_bps > 0`).
+  - [ ] Both values will be applied via `set_protocol_config` before the first match is created (see [Step 7 in Deployment Execution](#7-deployment-execution)).
 
 ---
 
@@ -206,15 +210,27 @@ Execute these steps in order. Record the transaction hash and contract ID for ea
   ```
   TX Hash: `_____________________________________________`
 
-- [ ] **Step 7** — Update oracle service configuration with the live contract IDs:
+- [ ] **Step 7** — Configure protocol fee:
+  ```bash
+  stellar contract invoke \
+    --id $ESCROW_CONTRACT_ID \
+    --source <ESCROW_ADMIN_KEYPAIR> \
+    --network mainnet \
+    -- set_protocol_config \
+    --config '{"protocol_fee_bps": <FEE_BPS>, "fee_recipient": "<FEE_RECIPIENT_ADDRESS>"}'
+  ```
+  Confirm with `get_protocol_config`; `protocol_fee_bps` and `fee_recipient` match intended values: ✓
+  TX Hash: `_____________________________________________`
+
+- [ ] **Step 8** — Update oracle service configuration with the live contract IDs:
   - `CONTRACT_ESCROW=<ESCROW_CONTRACT_ID>`
   - `CONTRACT_ORACLE=<ORACLE_CONTRACT_ID>`
   - `STELLAR_NETWORK=mainnet`
   - Confirm oracle service restarts cleanly and `/health` returns `healthy`.
 
-- [ ] **Step 8** — Update frontend / event indexer with mainnet contract IDs and restart.
+- [ ] **Step 9** — Update frontend / event indexer with mainnet contract IDs and restart.
 
-- [ ] **Step 9** — Archive / delete the deployer keypair as planned.
+- [ ] **Step 10** — Archive / delete the deployer keypair as planned.
 
 ---
 

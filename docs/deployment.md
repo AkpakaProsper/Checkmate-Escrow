@@ -125,6 +125,29 @@ To verify the current timeout:
 stellar contract invoke --id $ESCROW_CONTRACT_ID -- get_match_timeout
 ```
 
+### 7. Configure Protocol Fee (Mainnet — Recommended)
+
+By default `protocol_fee_bps` is `0` and no platform fee is collected. For mainnet deployments, set `protocol_fee_bps` and `fee_recipient` via `set_protocol_config` **before** the first match is created so that fees are applied consistently from launch.
+
+- `protocol_fee_bps` — fee in basis points taken from the winner's payout (e.g. `250` = 2.5 %). Must be ≤ `10_000` (100 %).
+- `fee_recipient` — Stellar address that receives the collected fee on each settled match. Draw refunds are never charged a fee.
+
+```bash
+stellar contract invoke \
+  --id $ESCROW_CONTRACT_ID \
+  --source <ESCROW_ADMIN_KEYPAIR> \
+  -- set_protocol_config \
+  --config '{"protocol_fee_bps": 250, "fee_recipient": "<FEE_RECIPIENT_ADDRESS>"}'
+```
+
+To verify the current configuration:
+
+```bash
+stellar contract invoke --id $ESCROW_CONTRACT_ID -- get_protocol_config
+```
+
+> **Note:** See [Mainnet Deployment Checklist](mainnet-deployment-checklist.md) for the corresponding sign-off item.
+
 ---
 
 ## Upgrade Rollback
@@ -174,6 +197,7 @@ Before launching on mainnet, verify each item below. These checks are intended t
 - [ ] Admin control has been transferred to a multisig. Confirm that the escrow and oracle admin roles are controlled by a multisig account rather than a single operator key. This prevents a single compromised key from changing critical contract parameters.
 - [ ] Oracle addresses have been verified. Double-check the oracle contract ID and any admin or authorized addresses used during initialization. This ensures results are routed to the intended oracle and avoids misconfiguration at launch.
 - [ ] The token allowlist has been reviewed. Confirm that the approved token set and contract IDs match the production plan. This prevents unintended assets from being accepted in matches.
+- [ ] Protocol fee has been configured. Set `protocol_fee_bps` and `fee_recipient` via `set_protocol_config` before the first match is created. Deploying with `protocol_fee_bps = 0` (the default) means no platform fee is ever collected. See [Step 7](#7-configure-protocol-fee-mainnet--recommended) in the Deployment Steps section.
 - [ ] Contract audit confirmation is recorded. Make sure the deployed contracts have passed a recent security review or audit and that any outstanding issues are understood and accepted. This lowers the chance of launching with an unresolved vulnerability.
 - [ ] Monitoring and alerting are in place. Configure alerts for deployment status, admin changes, oracle submissions, pause events, and unusual match activity. This gives operators early visibility into incidents or unexpected behavior.
 - [ ] Metrics endpoint authentication is enabled. Set `METRICS_AUTH_USERNAME` and `METRICS_AUTH_PASSWORD` on the oracle service so the Prometheus `/metrics` endpoint is not publicly readable (see [Metrics Endpoint Authentication](#metrics-endpoint-authentication)).
