@@ -52,6 +52,9 @@ schedule_upgrade(wasm_hash)
         │
         │  7-day review period (UPGRADE_REVIEW_PERIOD_LEDGERS = 120,960)
         ▼
+confirm_upgrade(upgrader)           ← second authorized address must confirm
+        │
+        ▼
 pause() the contract                ← admin must pause before executing
         │
         ▼
@@ -129,6 +132,9 @@ the following categories of tests:
 | `test_execute_upgrade_rejected_when_not_paused` | `InvalidPauseState` if not paused |
 | `test_execute_upgrade_rejected_before_review_period` | `UpgradeReviewPeriodNotElapsed` if too early |
 | `test_execute_upgrade_rejected_with_no_scheduled_upgrade` | `UpgradeNotScheduled` if none pending |
+| `test_execute_upgrade_rejected_without_confirmation` | `UpgradeNotConfirmed` if `confirm_upgrade` was not called |
+| `test_confirm_upgrade_without_scheduled_upgrade_is_rejected` | `UpgradeNotScheduled` when confirming with nothing pending |
+| `test_cancel_upgrade_clears_confirmation` | Cancelling an upgrade removes any recorded confirmation |
 
 ### Rollback Safety
 
@@ -242,35 +248,44 @@ stellar contract invoke \
 
 # 4. Wait for the review period to elapse (7 days = 120,960 ledgers)
 
-# 5. Pause the contract
+# 5. Confirm the upgrade with a second authorized key (multi-sig step).
+#    $UPGRADER_KEYPAIR must be a separate key from $DEPLOYER_KEYPAIR.
+#    This prevents a single compromised key from deploying arbitrary code.
+stellar contract invoke \
+    --id $CONTRACT_ESCROW \
+    --source $UPGRADER_KEYPAIR \
+    --network mainnet \
+    -- confirm_upgrade --upgrader "$UPGRADER_ADDRESS"
+
+# 6. Pause the contract
 stellar contract invoke \
     --id $CONTRACT_ESCROW \
     --source $DEPLOYER_KEYPAIR \
     --network mainnet \
     -- pause
 
-# 6. Execute the upgrade
+# 7. Execute the upgrade
 stellar contract invoke \
     --id $CONTRACT_ESCROW \
     --source $DEPLOYER_KEYPAIR \
     --network mainnet \
     -- execute_upgrade
 
-# 7. Run state migration
+# 8. Run state migration
 stellar contract invoke \
     --id $CONTRACT_ESCROW \
     --source $DEPLOYER_KEYPAIR \
     --network mainnet \
     -- migrate_state --target_version <new_version_number>
 
-# 8. Validate state
+# 9. Validate state
 stellar contract invoke \
     --id $CONTRACT_ESCROW \
     --source $DEPLOYER_KEYPAIR \
     --network mainnet \
     -- validate_state
 
-# 9. Unpause the contract
+# 10. Unpause the contract
 stellar contract invoke \
     --id $CONTRACT_ESCROW \
     --source $DEPLOYER_KEYPAIR \
@@ -279,6 +294,33 @@ stellar contract invoke \
 
 echo "✅ Upgrade complete."
 ```
+
+## Multi-Sig Confirmation Requirement
+
+`execute_upgrade` requires that a second authorized address call
+`confirm_upgrade` after `schedule_upgrade`. This two-step requirement means
+that a single compromised admin key cannot unilaterally deploy arbitrary code.
+
+**How it works:**
+
+1. The admin calls `schedule_upgrade(wasm_hash)` — starts the 7-day review clock.
+2. A second authorized `upgrader` address calls `confirm_upgrade(upgrader)` — signs off on the pending hash.
+3. After the review period elapses, the admin calls `execute_upgrade` — both conditions (review period elapsed *and* confirmation present) must be satisfied.
+
+If `confirm_upgrade` was never called, `execute_upgrade` returns
+`Error::UpgradeNotConfirmed` (#58).
+
+The confirmation is automatically cleared by both `cancel_upgrade` and
+`execute_upgrade`, so a confirmation from one upgrade cycle can never carry
+over to a subsequent cycle.
+
+**Key management guidance:**
+
+- Keep the `upgrader` key on a separate hardware wallet or HSM from the admin key.
+- The `upgrader` address does not need admin privileges — it only needs to be
+  able to invoke `confirm_upgrade` and pay the transaction fee.
+- For additional security, the `upgrader` address can itself be a multi-sig
+  wallet requiring M-of-N signatures.
 
 ---
 

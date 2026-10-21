@@ -48,7 +48,7 @@ use types::{
     DisputeState, FeeTier, Match, MatchState, OracleRotationState, PendingAdminProposal,
     PendingOracleRotation, Platform, PlatformStats, PlayerBalanceSnapshot, PlayerFreezeKey,
     PlayerRating, PlayerRatingKey, PlayerStats, PlayerTier, ProtocolConfig, SnapshotReason,
-    TempOracleRotation, TokenSymbolCacheKey, Winner,
+    TempOracleRotation, TokenSymbolCacheKey, UpgradeKey, Winner,
 };
 
 /// ~30 days at 5s/ledger. Used as the default TTL and expiration threshold.
@@ -6148,9 +6148,50 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
+        // Clear any confirmation recorded by confirm_upgrade so it cannot
+        // carry over to a subsequent upgrade cycle.
+        env.storage().instance().remove(&UpgradeKey::ConfirmedBy);
 
         env.events()
             .publish((Symbol::new(&env, "upgrade"), symbol_short!("cancel")), ());
+
+        Ok(())
+    }
+
+    /// Confirm a pending upgrade as a second authorized signer (multi-sig step).
+    ///
+    /// A separate `upgrader` address (distinct from the admin that called
+    /// `schedule_upgrade`) must call this function to attest that the pending
+    /// WASM hash has been independently reviewed and approved. `execute_upgrade`
+    /// will be rejected with `UpgradeNotConfirmed` until this confirmation is on
+    /// record.
+    ///
+    /// The upgrader is any address passed in and authorized via `require_auth`.
+    /// In production this should be a hardware-wallet address or a second
+    /// signing key that is kept separate from the admin key so that a single
+    /// compromised key cannot alone deploy arbitrary code.
+    ///
+    /// # Arguments
+    /// * `upgrader` — the address providing the second-factor confirmation.
+    ///
+    /// # Errors
+    /// * `UpgradeNotScheduled` — no upgrade is pending (nothing to confirm).
+    pub fn confirm_upgrade(env: Env, upgrader: Address) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+        upgrader.require_auth();
+
+        if !env.storage().instance().has(&DataKey::UpgradeScheduledAt) {
+            return Err(Error::UpgradeNotScheduled);
+        }
+
+        env.storage()
+            .instance()
+            .set(&UpgradeKey::ConfirmedBy, &upgrader);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade"), symbol_short!("confirm")),
+            upgrader,
+        );
 
         Ok(())
     }
@@ -6166,9 +6207,14 @@ impl EscrowContract {
     /// state-mutating transactions run against the old schema while the
     /// replacement WASM is being applied.
     ///
+    /// A second authorized address must have called `confirm_upgrade` after
+    /// `schedule_upgrade` was issued. This two-step requirement means that a
+    /// single compromised admin key cannot unilaterally deploy arbitrary code.
+    ///
     /// # Errors
     /// * `UpgradeNotScheduled`            — no upgrade is pending.
     /// * `UpgradeReviewPeriodNotElapsed`  — 7-day review period has not passed.
+    /// * `UpgradeNotConfirmed`            — `confirm_upgrade` has not been called.
     /// * `InvalidPauseState`              — contract is not paused.
     /// * `Unauthorized`                   — caller is not the admin.
     pub fn execute_upgrade(env: Env) -> Result<(), Error> {
@@ -6201,6 +6247,12 @@ impl EscrowContract {
             return Err(Error::UpgradeReviewPeriodNotElapsed);
         }
 
+        // Enforce multi-sig confirmation: a second authorized address must have
+        // called confirm_upgrade before execution is permitted.
+        if !env.storage().instance().has(&UpgradeKey::ConfirmedBy) {
+            return Err(Error::UpgradeNotConfirmed);
+        }
+
         let new_wasm_hash: BytesN<32> = env
             .storage()
             .instance()
@@ -6215,6 +6267,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
+        // Clear the confirmation so it cannot carry over to a future upgrade.
+        env.storage().instance().remove(&UpgradeKey::ConfirmedBy);
 
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());

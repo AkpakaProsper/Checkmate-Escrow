@@ -462,6 +462,24 @@ pub enum TokenSymbolCacheKey {
     TokenSymbol(Address),
 }
 
+/// Storage keys for the multi-sig upgrade confirmation step.
+///
+/// Kept as a separate `#[contracttype]` enum rather than added to `DataKey`
+/// for the same reason as other overflow keys: `DataKey` is at its 50-variant
+/// XDR cap.
+///
+/// `confirm_upgrade` writes `ConfirmedBy(upgrader_address)` once the second
+/// authorized signer approves the pending WASM hash. `execute_upgrade` reads
+/// this key to enforce the two-step requirement, then removes it. Both
+/// `cancel_upgrade` and `execute_upgrade` clear the key so the guard cannot
+/// carry over to a subsequent upgrade cycle.
+#[contracttype]
+pub enum UpgradeKey {
+    /// The address that confirmed the pending upgrade via `confirm_upgrade`.
+    /// Absence of this key means no confirmation has been recorded.
+    ConfirmedBy,
+}
+
 /// An oracle-verified ELO / platform rating for a player.
 ///
 /// Registered on-chain by the oracle via `register_player_rating` so that
