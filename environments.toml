@@ -53,6 +53,7 @@ rpc_url            = "https://soroban-mainnet.stellar.org"
 network_passphrase = "Public Global Stellar Network ; September 2015"
 
 [futurenet]
+# Re-PR for futurenet update
 # Stellar futurenet — preview of upcoming protocol features.
 # May be unstable; use only when testing features not yet on testnet.
 rpc_url            = "https://rpc-futurenet.stellar.org"
