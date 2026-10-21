@@ -84,6 +84,7 @@ Example `operation` label values: `create_match`, `deposit`, `submit_result`, `c
 | `checkmate_oracle_rotations_total` | Counter | Number of oracle address rotations |
 | `checkmate_oracle_api_duration_seconds` | Histogram | Latency of Lichess/Chess.com API calls |
 | `checkmate_stellar_rpc_health` | Gauge | `1` if Stellar RPC is reachable, `0` otherwise |
+| `oracle_slash_total` | Counter | Cumulative oracle slash events (incremented on each `oracle/slash` contract event) |
 
 ### Event Indexer
 
@@ -110,6 +111,7 @@ The event indexer watches Soroban contract events and increments the counters ab
 | `escrow/deposit` | `checkmate_tvl_stroops += stake` |
 | `escrow/payout` | `checkmate_tvl_stroops -= payout`, `checkmate_payouts_total_stroops += payout` |
 | `escrow/refund` | `checkmate_tvl_stroops -= refund`, `checkmate_refunds_total_stroops += refund` |
+| `oracle/slash` | `oracle_slash_total++` |
 
 > The event indexer derives these metrics from the event stream rather than direct contract queries, so they remain accurate even if the RPC node is temporarily unavailable — metrics are backfilled when the indexer catches up.
 
@@ -209,6 +211,8 @@ The dashboard ships with the following panels:
 | Error Rate | Error Rate % | Time series with 5% threshold line |
 | Oracle Health | Oracle Submissions | Submission rate and error rate |
 | Oracle Health | Oracle API Latency | p50 / p95 latency from Lichess/Chess.com |
+| Oracle Slashing | Slash Events (rate/5m) | Time-series bar chart of `oracle_slash_total` rate; non-zero means oracles are being penalised |
+| Oracle Slashing | Total Slash Events (All Time) | Stat panel showing cumulative slash count; turns yellow at 1, red at 5 |
 
 ---
 
