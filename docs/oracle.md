@@ -897,6 +897,21 @@ The mapping is implemented in `oracle-service/src/oracle/chess_com_client.rs` in
 
 The oracle will **never** submit a result on-chain until a verified terminal `end.result` of `"white"`, `"black"`, or `"draw"` is received.
 
+### Rate Limits
+
+Chess.com's public API (PubAPI) does not publish a fixed numeric request cap. Instead:
+
+- **Serial requests are unlimited** — sequential, non-parallel calls are not throttled.
+- **Parallel requests may be rate-limited** — concurrent bursts can trigger a `429 Too Many Requests` response. There is no documented numeric threshold; throttling is enforced dynamically based on server load.
+- **Cache invalidation** — endpoints refresh at most once every 12 hours. Responses include `ETag` and `Last-Modified` headers; sending `If-None-Match` / `If-Modified-Since` can yield a `304 Not Modified` and avoid counting against implicit rate limits.
+- **Abnormal activity** — sustained high-volume or abusive patterns may result in temporary IP blocking. Including a descriptive `User-Agent` header with contact info can help resolve blocks.
+
+The oracle client applies a conservative client-side token-bucket limiter (see [Chess.com API Rate Limits, Timeouts, and Offline Fallback](#chesscom-api-rate-limits-timeouts-and-offline-fallback)) configured at **30 req/min** (0.5 req/s sustained) with a burst ceiling of **5 requests** and a max of **4 concurrent in-flight requests**. This stays well within Chess.com's undocumented dynamic throttle.
+
+#### Requesting higher limits
+
+Chess.com does not offer a formal process to request elevated API rate limits for the PubAPI. If you need higher throughput or authenticated access for an application or service, contact Chess.com via their [developer settings page](https://www.chess.com/settings/developer) or the [Developer Community Club forums](https://www.chess.com/clubs/forum). The `X-Chess-Com-API-Key` header is included on all oracle requests for forward-compatibility — if Chess.com introduces API-key-gated higher tiers in the future, the oracle will automatically benefit.
+
 ### Platform API Comparison: Lichess vs Chess.com
 
 Developers integrating a new oracle client or adding support for additional platforms should understand the key differences between Lichess and Chess.com APIs:

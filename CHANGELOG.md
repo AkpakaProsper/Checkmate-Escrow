@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `admin_resolve_stalled_match` — admin-gated recovery function for Active matches stuck after the 24-hour player rollback window expires and the oracle has failed to submit a result for more than 7 days. Provides a bounded recovery path so funds are never permanently locked in the event of prolonged oracle outage or lost signing keys.
 - `ADMIN_STALL_WINDOW_SECONDS` constant (7 days) — configurable threshold after which admin can invoke stall resolution, long enough not to compete with the player-initiated 24-hour rollback window.
 - `admin_freeze_player` / `admin_unfreeze_player` — targeted per-player freeze that blocks a single address from creating matches and depositing, without pausing the contract for other users. The freeze reason is stored on-chain; `is_player_frozen` / `get_frozen_players` expose state. Fund-recovery paths (cancel/expire/claim) and oracle settlement of existing matches are deliberately unaffected.
+- Rate limits subsection in the Chess.com Integration section of `docs/oracle.md`, documenting the PubAPI's serial/parallel throttling model, cache invalidation behavior, the oracle client's conservative 30 req/min token-bucket configuration, and how to request higher limits. Closes #1800.
 
 ### Fixed
 - Active matches can no longer be cancelled; attempts return `InvalidState`, and the create-match form resets when the connected wallet account changes.
