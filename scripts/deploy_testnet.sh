@@ -36,6 +36,14 @@ if [[ ! -f "target/wasm32-unknown-unknown/release/oracle.wasm" ]] || [[ ! -f "ta
     ./scripts/build.sh
 fi
 
+# Expected on-chain contract version, derived from the built WASM's package version
+EXPECTED_VERSION=$(grep -m1 '^version' contracts/escrow/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+if [[ -z "$EXPECTED_VERSION" ]]; then
+    echo "❌ Error: Could not determine expected contract version from contracts/escrow/Cargo.toml"
+    exit 1
+fi
+echo "🏷️  Expected contract version: $EXPECTED_VERSION"
+
 echo "📦 Deploying Oracle contract..."
 ORACLE_CONTRACT_ID=$(stellar contract deploy \
     --wasm target/wasm32-unknown-unknown/release/oracle.wasm \
@@ -103,13 +111,40 @@ check_initialized() {
     return 0
 }
 
+check_version() {
+    local name="$1"
+    local contract_id="$2"
+    local result
+
+    if ! result=$(stellar contract invoke \
+        --id "$contract_id" \
+        --source "$DEPLOYER_KEYPAIR" \
+        --network "$NETWORK" \
+        -- \
+        get_contract_version 2>&1); then
+        echo "❌ Version check failed for $name contract ($contract_id):"
+        echo "   $result"
+        return 1
+    fi
+
+    if [[ "$result" != *"$EXPECTED_VERSION"* ]]; then
+        echo "❌ $name contract ($contract_id) version mismatch: expected $EXPECTED_VERSION, got $result"
+        return 1
+    fi
+
+    echo "   ✅ $name contract version matches ($EXPECTED_VERSION)"
+    return 0
+}
+
 HEALTH_OK=1
 check_initialized "Oracle" "$ORACLE_CONTRACT_ID" || HEALTH_OK=0
 check_initialized "Escrow" "$ESCROW_CONTRACT_ID" || HEALTH_OK=0
+check_version "Oracle" "$ORACLE_CONTRACT_ID" || HEALTH_OK=0
+check_version "Escrow" "$ESCROW_CONTRACT_ID" || HEALTH_OK=0
 
 if [[ "$HEALTH_OK" -ne 1 ]]; then
     echo ""
-    echo "❌ Deployment health check failed. One or more contracts are not initialized."
+    echo "❌ Deployment health check failed. One or more contracts are not initialized or have a version mismatch."
     exit 1
 fi
 
@@ -129,4 +164,3 @@ echo ""
 echo "🧪 Test the deployment:"
 echo "   stellar contract invoke --id $ESCROW_CONTRACT_ID --network $NETWORK -- get_admin"
 echo "   stellar contract invoke --id $ORACLE_CONTRACT_ID --network $NETWORK -- get_admin"
-<parameter name="filePath">/home/farouq/Desktop/Checkmate-Escrow/scripts/deploy_testnet.sh
