@@ -14,6 +14,7 @@ By the end you will have:
 - ✅ Created a match between two players
 - ✅ Funded the escrow with both players' stakes
 - ✅ Submitted a verified result and watched the winner get paid automatically
+- ✅ Verified the on-chain payout transaction on Stellar Explorer
 
 ---
 
@@ -54,6 +55,7 @@ Pick the format that suits you — the content is identical across all three:
 | Step 1 | Create a match | ~2 min |
 | Step 2 | Deposit funds | ~2 min |
 | Step 3 | Check the result & payout | ~3 min |
+| Step 4 | Verify the payout | ~2 min |
 | **Total** | | **< 15 min** |
 
 > 💡 **First time only:** the contract build (`./scripts/build.sh`) can take a
@@ -280,6 +282,53 @@ paid 20 XLM?*
 <code>get_escrow_balance</code> reports funds <em>held in escrow for the match</em>.
 Once the payout executes, the pot has left escrow (it is now in the winner's
 wallet), so the escrow balance for that match is <code>0</code>.
+</details>
+
+---
+
+## 🔍 Step 4 — Verify the payout
+
+**What you're doing:** inspecting the on-chain settlement and payout transaction using Stellar Explorer (Stellar Expert and Stellar Laboratory).
+
+**Why it matters:** blockchain transactions are publicly verifiable. Checking your transaction on an explorer confirms that the escrow contract transferred the pot directly to the winner's wallet on the Stellar ledger, providing independent verification beyond local CLI output.
+
+### Option 1: Verify on Stellar Expert
+
+Stellar Expert is a block explorer for inspecting accounts, transactions, and Soroban contracts on Stellar.
+
+- **Inspect the winner's account transactions:**
+  ```text
+  https://stellar.expert/explorer/testnet/account/<WINNER_ADDRESS>
+  ```
+  Replace `<WINNER_ADDRESS>` with `$P1_ADDR` (or the winner's address). Under the **Payments** / **History** section, you will see the incoming transfer of 20 XLM credited to the winner from the escrow contract.
+
+- **Inspect the escrow contract:**
+  ```text
+  https://stellar.expert/explorer/testnet/contract/<ESCROW_ID>
+  ```
+  Replace `<ESCROW_ID>` with `$ESCROW_ID` to inspect recent contract calls, event emissions, and token transfer history.
+
+- **Inspect the payout transaction directly:**
+  ```text
+  https://stellar.expert/explorer/testnet/tx/<TRANSACTION_HASH>
+  ```
+  Replace `<TRANSACTION_HASH>` with the transaction hash output from the Step 3b `submit_result` invocation.
+
+### Option 2: Verify on Stellar Laboratory
+
+Alternatively, you can inspect transaction envelopes, operations, and ledger effects directly using Stellar Laboratory:
+
+```text
+https://laboratory.stellar.org/#explorer?resource=transactions&endpoint=single&values=<TRANSACTION_HASH>&network=testnet
+```
+
+> 📸 _Screenshot:_ `assets/tutorial/04-verify-payout.png` — Stellar Expert view showing the payout transfer transaction to the winner's address.
+
+✅ **Checkpoint:** you can view the on-chain payment operation crediting the winner's account with the pot on the testnet explorer. 🎉 **You've completed and verified a full match lifecycle!**
+
+🧩 **Quick check:** *How does Stellar Expert verify the escrow payout occurred?*
+<details><summary>Answer</summary>
+The ledger records a contract call to <code>submit_result</code> which invoked the token contract transfer, debiting the escrow contract balance and crediting the winner's address with the payout amount.
 </details>
 
 ---

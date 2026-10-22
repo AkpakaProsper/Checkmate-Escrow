@@ -44,6 +44,12 @@ Copy this into a GitHub issue/PR (or just tick along in your editor) as you go.
 - [ ] Confirmed the match state is `Completed`
 - [ ] Confirmed the escrow balance returned to `0`
 
+### Step 4 — Verify the payout
+
+- [ ] Looked up the winner's address on Stellar Expert
+- [ ] Verified the incoming payout transfer on testnet explorer
+- [ ] Inspected the payout transaction or contract on Stellar Laboratory
+
 ### Wrap-up
 
 - [ ] Whole flow completed in **under 15 minutes**
