@@ -34,9 +34,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  abi-snapshot:
-    name: Escrow ABI Snapshot
+  compare:
+    name: Escrow ABI Snapshot (compare)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v5
@@ -132,3 +135,83 @@ jobs:
             echo "before merging this PR."
             exit 1
           fi
+
+  update-baseline:
+    name: Escrow ABI Snapshot (update baseline)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.ABI_SNAPSHOT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust (wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-abi-${{ hashFiles('contracts/escrow/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-abi-
+
+      - name: Build escrow contract (release WASM)
+        run: |
+          cd contracts/escrow
+          cargo build --target wasm32-unknown-unknown --release
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/download/v21.5.0/stellar-cli-21.5.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /usr/local/bin stellar
+          stellar --version
+
+      - name: Regenerate ABI snapshot
+        run: |
+          stellar contract inspect \
+            --wasm target/wasm32-unknown-unknown/release/escrow.wasm \
+            --output json \
+            > /tmp/current-spec-raw.json
+
+          python3 - <<'EOF'
+          import json
+
+          with open('/tmp/current-spec-raw.json') as f:
+              raw = json.load(f)
+
+          functions = []
+          entries = raw if isinstance(raw, list) else raw.get('entries', [])
+          for entry in entries:
+              fn = entry.get('function_v0') or entry.get('FunctionV0')
+              if fn:
+                  name = fn.get('name') or fn.get('Name', '')
+                  if name:
+                      functions.append(name)
+
+          functions.sort()
+          with open('contracts/escrow/contract-spec.json', 'w') as f:
+              json.dump({'functions': [{'name': n} for n in functions]}, f, indent=2)
+              f.write('\n')
+
+          print(f'Wrote {len(functions)} public functions to baseline')
+          EOF
+
+      - name: Commit and push updated baseline
+        run: |
+          if git diff --quiet -- contracts/escrow/contract-spec.json; then
+            echo "✅ Baseline already up to date — nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add contracts/escrow/contract-spec.json
+          git commit -m "chore(abi): update escrow ABI snapshot baseline"
+          git push

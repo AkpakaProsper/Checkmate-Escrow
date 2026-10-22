@@ -6368,6 +6368,10 @@ impl EscrowContract {
             .get(&DataKey::ContractVersion)
             .unwrap_or(CONTRACT_VERSION);
 
+        // Reject downgrades and no-op migrations: the target must be strictly
+        // ahead of the stored version. This guard runs before any storage
+        // mutation or migration step so a mistaken/malicious admin call can
+        // never roll the schema back to an older layout.
         if target_version <= current {
             return Err(Error::InvalidVersion);
         }
