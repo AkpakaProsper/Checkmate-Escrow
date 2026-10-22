@@ -182,7 +182,7 @@ impl OracleContract {
     /// summed.
     ///
     /// # Errors
-    /// - [`Error::InsufficientStake`] — `stake_amount` is not positive.
+    /// - [`Error::InvalidAmount`] — `stake_amount` is not positive.
     /// - [`Error::StakeTokenMismatch`] — `token` differs from the token
     ///   backing this oracle's existing registration.
     pub fn register_oracle_with_stake(
@@ -195,7 +195,7 @@ impl OracleContract {
         oracle_address.require_auth();
 
         if stake_amount <= 0 {
-            return Err(Error::InsufficientStake);
+            return Err(Error::InvalidAmount);
         }
 
         let registration_key = DataKey::OracleRegistration(oracle_address.clone());
