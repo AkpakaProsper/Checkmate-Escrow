@@ -12,6 +12,7 @@ This document outlines the security considerations, trust assumptions, and risk 
 - [Pause Mechanism](#pause-mechanism)
 - [Cross-Contract Reentrancy Protection](#cross-contract-reentrancy-protection)
 - [Oracle Service HTTP Hardening](#oracle-service-http-hardening)
+- [Frontend Security](#frontend-security)
 - [Known Limitations](#known-limitations)
 - [Deployment Security](#deployment-security)
 - [Operational Security](#operational-security)
@@ -336,6 +337,321 @@ in `oracle-service/src/main.rs` and implemented in
 Both layers run on every request before it reaches a handler; see
 [docs/oracle.md § HTTP Layer Protections](oracle.md#http-layer-protections-waf--rate-limiting)
 for the layering order and full detail.
+
+## Frontend Security
+
+### Transaction Simulation Before Signing
+
+Before users sign transactions, the frontend should simulate them to verify their correctness and prevent unexpected behavior. This protects against malicious dApps or XSS attacks that attempt to inject unauthorized operations into transactions.
+
+#### Simulation Process
+
+1. **Build Transaction**: Construct the transaction XDR locally with all intended operations
+2. **Validate Operations**: Ensure operation types, parameters, and amounts match user intent
+3. **Simulate on RPC**: Submit the transaction to an RPC node with `skipSigning: true` (or equivalent) to dry-run the transaction without broadcasting
+4. **Check Result**: Verify:
+   - Simulation succeeds (no `InvokeHostFunction` error)
+   - Return value type matches expectations (e.g., `Ok` variant for a contract call)
+   - Gas estimate is within reasonable bounds
+5. **Show Summary to User**: Display the decoded transaction details (operations, amounts, contract function, arguments) before asking the user to sign
+6. **Sign After Confirmation**: Only after user approves the decoded summary should the wallet be asked to sign
+
+#### Implementation Example
+
+```typescript
+import { SorobanRpc } from '@stellar/js-sdk';
+
+const rpc = new SorobanRpc.Server(horizonUrl);
+
+// Build transaction
+const txBuilder = new TransactionBuilder(...)
+  .addOperation(Contract.Escrow.deposit({ match_id: 42, ... }))
+  .setNetworkPassphrase(networkPassphrase)
+  .setTimeout(300)
+  .build();
+
+const txXdr = txBuilder.toXDR();
+
+// Simulate before signing
+try {
+  const simulation = await rpc.simulateTransaction(txBuilder);
+  if (SorobanRpc.Api.isSimulationSuccess(simulation)) {
+    // Transaction would succeed; safe to sign
+    console.log('Simulation succeeded. Gas estimate:', simulation.latestLedger);
+  } else {
+    // Simulation failed; do not proceed
+    console.error('Simulation failed:', simulation);
+    throw new Error('Transaction would fail');
+  }
+} catch (err) {
+  console.error('Simulation error:', err);
+  throw err;
+}
+
+// Show user the decoded transaction summary before signing
+displayTransactionSummary(txBuilder.operations);
+
+// Only after user confirms, ask wallet to sign
+const signedXdr = await wallet.sign(txXdr);
+```
+
+#### Protection Against Attacks
+
+| Attack | Mitigation |
+|--------|-----------|
+| Malicious dApp injects extra operations | Simulation fails or shows unexpected operations in summary |
+| Wrong contract address | Simulation fails or decoding shows mismatch |
+| Wrong function arguments (e.g., wrong recipient, wrong amount) | Simulation fails or user sees unexpected values in summary |
+| XSS injects code to modify XDR after build | Simulation catches malformed/unsigned XDR; wallet shows decoded operations before sign |
+| Wallet extension replaced with malicious one | No protection; user must ensure extensions come from official sources |
+
+### Cross-Site Scripting (XSS) Prevention
+
+XSS attacks on the Checkmate-Escrow frontend can compromise the wallet connection flow, allowing attackers to redirect transactions, steal signing requests, or intercept signed transactions.
+
+#### Content Security Policy (CSP) Headers
+
+The frontend deployment must enforce strict Content Security Policy headers to prevent inline script execution and restrict external script sources.
+
+**Recommended CSP Headers:**
+
+```
+Content-Security-Policy:
+  default-src 'self';
+  script-src 'self' https://albedo.link;
+  connect-src 'self' https://horizon-testnet.stellar.org https://horizon.stellar.org https://albedo.link;
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data: https:;
+  frame-src https://albedo.link;
+  object-src 'none';
+  base-uri 'self';
+  form-action 'self';
+  upgrade-insecure-requests;
+```
+
+**Header Breakdown:**
+
+| Directive | Purpose |
+|-----------|---------|
+| `default-src 'self'` | All resources default to same-origin only |
+| `script-src 'self' https://albedo.link` | Only load scripts from your domain or Albedo (for popup) |
+| `connect-src 'self' https://horizon-*.stellar.org https://albedo.link` | Allow API calls to Horizon (RPC) and Albedo signing popup |
+| `style-src 'self' 'unsafe-inline'` | Load styles from same-origin; inline styles if needed (prefer stylesheets instead) |
+| `img-src 'self' data: https:` | Images from same-origin, data URIs, or HTTPS |
+| `frame-src https://albedo.link` | Albedo signing popup is allowed as a framed context |
+| `object-src 'none'` | Disable plugins (Flash, etc.) |
+| `base-uri 'self'` | Prevent `<base>` tag hijacking |
+| `form-action 'self'` | Forms can only POST to same-origin |
+| `upgrade-insecure-requests` | Force HTTP → HTTPS upgrades |
+
+**Implementation:**
+
+- **Webpack/Vite**: Configure headers in `vite.config.ts` (dev) and deployment middleware (production)
+- **Nginx**: Add to `server` block
+- **Express.js**: Use `helmet()` middleware with custom CSP config
+- **Vercel/Netlify**: Configure in `vercel.json` / `netlify.toml` via `_headers` file
+
+#### Subresource Integrity (SRI)
+
+For any external JavaScript dependencies (e.g., `@stellar/js-sdk`), use Subresource Integrity (SRI) hashes to ensure the file has not been tampered with:
+
+```html
+<script src="https://cdn.example.com/stellar.js"
+        integrity="sha384-abc123...xyz"
+        crossorigin="anonymous"></script>
+```
+
+Generate SRI hashes with:
+```bash
+npm install -g npm-sri
+npm-sri https://cdn.example.com/stellar.js
+```
+
+#### Input Validation & Output Encoding
+
+1. **Validate Transaction XDR**: Before passing XDR to the wallet, validate it is well-formed (use `TransactionBuilder.fromXDR()` or `FeeBumpTransaction.fromXDR()` to parse)
+2. **Encode User Output**: When displaying contract addresses, account IDs, or transaction hashes, use `.substring(0, 4) + '...' + .substring(-4)` (truncate) rather than `innerHTML` to prevent injection
+3. **Sanitize Error Messages**: If displaying error messages from RPC nodes or contract failures, sanitize them before rendering (use a library like `xss` or `DOMPurify`)
+
+#### Example with DOMPurify
+
+```typescript
+import DOMPurify from 'dompurify';
+
+// Safe rendering of account address
+const displayAddress = (address: string) => {
+  const truncated = address.substring(0, 6) + '...' + address.substring(-6);
+  return DOMPurify.sanitize(truncated); // Still safe for plain text, but defensive
+};
+
+// Safe error message display
+const showError = (message: string) => {
+  const sanitized = DOMPurify.sanitize(message, { ALLOWED_TAGS: [] });
+  errorDiv.textContent = sanitized; // textContent is safer than innerHTML
+};
+```
+
+### Wallet Connection Best Practices
+
+#### Wallet Security Model
+
+Checkmate-Escrow supports **Freighter** and **Albedo** for signing. Both wallets implement the following security principles:
+
+1. **No Private Key Export**: Private keys are never exposed to the frontend or user
+2. **Explicit User Approval**: Every transaction requires explicit user approval in the wallet UI
+3. **Transaction Inspection**: Both wallets decode and display transaction details before signing
+4. **Isolated Signing Context**: Freighter's extension sandbox and Albedo's popup window isolate signing from the host page
+
+#### Connection Best Practices
+
+1. **Use Official Wallets**: Link to official wallet installation pages:
+   - Freighter: https://freighter.app
+   - Albedo: https://albedo.link (no installation required)
+
+2. **Validate Wallet Availability**: Before attempting connection, check that the wallet extension or popup window is available:
+
+   ```typescript
+   import { isFreighterInstalled } from '@stellar/freighter-api';
+
+   if (!isFreighterInstalled()) {
+     showMessage('Freighter not installed. Please install it first.');
+   }
+
+   // Albedo is always available in a browser (popup-based)
+   ```
+
+3. **Handle Disconnection Gracefully**: 
+   - Users may revoke wallet access, close the browser extension, or manually disconnect
+   - Display a "Reconnect" button rather than showing errors
+   - Clear local state (auth tokens, cached balances) on disconnect
+   - Do not cache signed transactions across sessions without re-authorization
+
+4. **Reject Unexpected Network Changes**: 
+   - Wallets may switch networks (testnet ↔ mainnet)
+   - Always verify the connected network matches the expected network before signing
+   - Reject transactions if the network mismatches:
+
+   ```typescript
+   const expectedNetwork = 'Test SDF Network ; September 2015'; // testnet
+   const userNetwork = await wallet.getNetwork();
+   
+   if (userNetwork !== expectedNetwork) {
+     throw new Error(
+       `Network mismatch. Expected: ${expectedNetwork}, got: ${userNetwork}`
+     );
+   }
+   ```
+
+5. **Rate-Limit Signing Requests**: Prevent rapid-fire signing requests that could confuse users or enable replay attacks:
+
+   ```typescript
+   let lastSignTime = 0;
+   const SIGN_COOLDOWN_MS = 2000; // 2 seconds between sign requests
+
+   async function signWithCooldown(xdr: string) {
+     const now = Date.now();
+     if (now - lastSignTime < SIGN_COOLDOWN_MS) {
+       throw new Error('Please wait before signing another transaction');
+     }
+     lastSignTime = now;
+     return await wallet.sign(xdr);
+   }
+   ```
+
+6. **Display Clear Feedback**: Show users what action is in progress:
+   - "Connecting to wallet..."
+   - "Signing transaction..." (disable buttons during signing)
+   - "Transaction signed. Submitting to network..." 
+   - "Transaction submitted. Waiting for confirmation..."
+
+#### Wallet-Specific Considerations
+
+**Freighter (Browser Extension)**
+- Available in Chrome, Firefox, Edge
+- Keys stored in extension storage (browser sandbox)
+- Extension popup overlays the page during signing
+- Availability check: `isFreighterInstalled()` from `@stellar/freighter-api`
+
+**Albedo (Web Popup)**
+- No installation required — works in any browser
+- User logs into `albedo.link` with their chosen key manager (TOTP, password, Ledger, etc.)
+- Opens a popup window for signing (popup blocker must allow it)
+- Always available: check `typeof window !== 'undefined'` and trigger from user gesture (click event)
+
+#### Session Management
+
+1. **Expiration**: Do not cache wallet sessions indefinitely. Prompt user to re-connect after:
+   - 24 hours of inactivity
+   - Page reload / new session
+   - Manual disconnect
+
+2. **Multi-Tab Safety**: If user connects in one tab and disconnects in another, sync state:
+   - Use `localStorage` change events or `BroadcastChannel` to notify other tabs
+   - Clear wallet session state across all tabs on disconnect
+
+   ```typescript
+   // Broadcast disconnect to other tabs
+   window.localStorage.setItem('wallet:disconnect', Date.now().toString());
+
+   // Listen for disconnect from other tabs
+   window.addEventListener('storage', (event) => {
+     if (event.key === 'wallet:disconnect') {
+       disconnect(); // Clear local state
+     }
+   });
+   ```
+
+3. **Secure Storage**: Store only public data (address, balance, transaction history):
+   - Never store private keys, seed phrases, or wallet passwords
+   - Never store signed XDR longer than needed (clear after broadcast)
+   - Use `sessionStorage` for temporary data, `localStorage` for persistent public data
+
+#### Error Handling
+
+| Scenario | Cause | User Action |
+|----------|-------|-------------|
+| "Wallet not installed" | Freighter not found | Redirect to installation page |
+| "Connection denied" | User rejected access in wallet | Offer to retry or choose different wallet |
+| "Signing cancelled" | User clicked cancel in wallet popup | Offer to retry transaction |
+| "Invalid network" | Wallet switched to different network | Prompt user to switch back |
+| "Timeout signing" | Wallet popup closed or locked | Offer to retry transaction |
+
+### Monitoring & Incident Response
+
+#### Frontend Security Monitoring
+
+1. **CSP Violations**: Log CSP violations to identify injection attempts:
+   ```typescript
+   document.addEventListener('securitypolicyviolation', (e) => {
+     console.error('CSP violation:', {
+       blockedURI: e.blockedURI,
+       violatedDirective: e.violatedDirective,
+       originalPolicy: e.originalPolicy,
+     });
+     // Send to monitoring service (Sentry, Datadog, etc.)
+   });
+   ```
+
+2. **Wallet Anomalies**:
+   - Multiple failed signing attempts from same session
+   - Network mismatches (user switches networks mid-session)
+   - Unusual transaction patterns (e.g., rapid successive transactions)
+
+3. **XSS Attempts**:
+   - Monitor console for unexpected errors
+   - Log failed deserialization of XDR or responses
+   - Alert on unusual API calls or network traffic
+
+#### Incident Response Checklist
+
+- [ ] Disable wallet connection if XSS vulnerability detected
+- [ ] Rotate CSRF tokens if CSRF found
+- [ ] Review CSP logs for injection attempts
+- [ ] Audit recent transactions for unauthorized activity
+- [ ] Notify users if sensitive data may have been compromised
+- [ ] Update CSP/SRI hashes after patching vulnerabilities
+
+---
 
 ## Known Limitations
 
