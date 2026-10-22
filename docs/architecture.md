@@ -659,3 +659,34 @@ This is the recommended starting point for anyone performing a contract upgrade 
 - **Payout**: The transfer of escrowed funds to the winning player after a match result is accepted, or the return of funds in a draw or cancellation scenario.
 - **Wave**: A higher-level grouping or lifecycle concept in the project’s broader product model, referring to a batch of related match activity or coordinated release behavior in documentation and product discussions.
 
+
+## predict-iq Contract
+
+### Purpose
+
+`contracts/predict-iq/` is a planned Soroban smart contract that will extend Checkmate-Escrow beyond head-to-head chess wagering into **on-chain prediction markets**. Where the escrow contract settles a single binary outcome (player1 wins, player2 wins, or draw), `predict-iq` is designed to support multi-outcome prediction pools — for example, "will this chess game last more than 40 moves?" or "which player will win the next tournament round?" — where participants stake on one of several possible outcomes and payouts are distributed proportionally to the winning side's share of the pool.
+
+The contract is intended to complement, not replace, the escrow contract. It will share the same oracle infrastructure (the existing `contracts/oracle/` contract) for result verification and will be deployed as a separate contract instance with its own admin and configuration.
+
+### Current Status
+
+`contracts/predict-iq/` is a **stub / work-in-progress**. The directory and skeleton Cargo crate have not yet been added to the repository; the contract appears on the roadmap as a future milestone. No public API surface, storage layout, or event schema has been finalised.
+
+Key points for contributors:
+
+- There are no deployable artifacts or ABI bindings for `predict-iq` yet.
+- The contract is not referenced by the escrow or oracle contracts and has no integration points in the current codebase.
+- The name `predict-iq` is provisional; it may change before the first implementation PR.
+
+### Roadmap Integration
+
+`predict-iq` is tracked as a **post-v4.0 future consideration** (see [docs/roadmap.md](roadmap.md#future-considerations)). It is not scheduled for any of the currently planned release milestones (v1.x through v4.0). Integration with the escrow and oracle contracts is expected to follow this sequence once the design is ready:
+
+1. Add `contracts/predict-iq/` crate with skeleton `lib.rs` and `Cargo.toml`.
+2. Define the prediction-pool data model (pool, outcome, participant stake record).
+3. Implement the oracle result callback — reuse the existing oracle contract's `submit_result` / consensus path to resolve pools.
+4. Wire up payout distribution and cancellation logic.
+5. Register the contract in the workspace `Cargo.toml` and CI build matrix.
+6. Add a dedicated section in `docs/oracle.md` covering the `predict-iq` oracle integration path.
+
+Until those steps are complete, `contracts/predict-iq/` should be treated as out-of-scope for feature work and security reviews.
