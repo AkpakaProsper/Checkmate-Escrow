@@ -2898,8 +2898,13 @@ impl EscrowContract {
         // Only Active matches may be rolled back. Pending matches should use
         // `cancel_match`; PendingResult/Completed have the oracle dispute path;
         // Paused matches can be either resumed or expired depending on intent.
-        // #1517: PendingResult means the oracle has already determined a result —
-        // rollback is explicitly rejected here.
+        // #1817: Explicitly reject rollback if a result has already been submitted
+        // (PendingResult or Completed state). Players must not be able to trigger
+        // a rollback vote after oracle submission.
+        if m.state == MatchState::PendingResult || m.state == MatchState::Completed {
+            return Err(Error::InvalidState);
+        }
+
         if m.state != MatchState::Active {
             return Err(Error::InvalidState);
         }
