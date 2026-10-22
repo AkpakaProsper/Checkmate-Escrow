@@ -36,7 +36,10 @@ fn setup_for_slash_relay_test() -> (
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2,
-        &String::from_str(&env, "relay_evidence"),
+        &String::from_str(
+            &env,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
     );
 
     client.vote_on_dispute(&dispute_id, &player2, &true);
@@ -139,7 +142,10 @@ fn test_relay_slash_signal_names_correct_oracle() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2,
-        &String::from_str(&env, "relay_oracle_test"),
+        &String::from_str(
+            &env,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
     );
 
     client.vote_on_dispute(&dispute_id, &player2, &true);
@@ -252,7 +258,10 @@ fn test_relay_slash_signal_requires_overturned_state() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2,
-        &String::from_str(&env, "relay_upheld"),
+        &String::from_str(
+            &env,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
     );
 
     // Resolve as upheld (not overturned)

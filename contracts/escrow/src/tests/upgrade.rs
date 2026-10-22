@@ -411,6 +411,40 @@ fn test_migrate_state_v010_to_v011_seeds_dispute_period() {
 }
 
 #[test]
+fn test_migrate_state_preserves_existing_data_across_sequential_versions() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.set_dispute_period(&37u32);
+    let match_id = client.create_match(
+        &player1,
+        &player2,
+        &100i128,
+        &token,
+        &String::from_str(&env, "migration"),
+        &Platform::Lichess,
+    );
+    let original_match = client.get_match(&match_id);
+    let original_match_count = client.get_match_count();
+
+    client.migrate_state(&1_001u32);
+    assert_eq!(client.get_dispute_period(), 37);
+    assert_eq!(client.get_match_count(), original_match_count);
+    let after_first_migration = client.get_match(&match_id);
+    assert_eq!(after_first_migration.player1, original_match.player1);
+    assert_eq!(after_first_migration.player2, original_match.player2);
+    assert_eq!(after_first_migration.stake_amount, original_match.stake_amount);
+
+    client.migrate_state(&1_000_000u32);
+    assert_eq!(client.get_dispute_period(), 37);
+    assert_eq!(client.get_match_count(), original_match_count);
+    let after_second_migration = client.get_match(&match_id);
+    assert_eq!(after_second_migration.player1, original_match.player1);
+    assert_eq!(after_second_migration.player2, original_match.player2);
+    assert_eq!(after_second_migration.stake_amount, original_match.stake_amount);
+}
+
+#[test]
 fn test_migrate_state_emits_event() {
     let (env, contract_id, _oracle, _p1, _p2, _token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);

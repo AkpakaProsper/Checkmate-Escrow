@@ -404,6 +404,15 @@ impl OracleContract {
             &DataKey::PendingSlash(oracle_address.clone(), match_id),
             &pending,
         );
+        let mut pending_matches: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingSlashList(oracle_address.clone()))
+            .unwrap_or(Vec::new(&env));
+        pending_matches.push_back(match_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingSlashList(oracle_address.clone()), &pending_matches);
 
         env.events().publish(
             (Symbol::new(&env, "oracle"), symbol_short!("slashstg")),
@@ -462,6 +471,7 @@ impl OracleContract {
             Self::bump_oracle_eligibility_version(&env);
         }
         env.storage().instance().remove(&key);
+        Self::remove_pending_slash_match(&env, &oracle_address, match_id);
 
         if slash_amount > 0 {
             let token_client = token::Client::new(&env, &pending.token);
@@ -500,6 +510,7 @@ impl OracleContract {
             return Err(Error::SlashNotFound);
         }
         env.storage().instance().remove(&key);
+        Self::remove_pending_slash_match(&env, &oracle_address, match_id);
 
         env.events().publish(
             (Symbol::new(&env, "admin"), symbol_short!("slashcxl")),
@@ -518,6 +529,50 @@ impl OracleContract {
         env.storage()
             .instance()
             .get(&DataKey::PendingSlash(oracle_address, match_id))
+    }
+
+    /// Return every staged, unfinalized slash for an oracle.
+    ///
+    /// The list is empty when the oracle has no pending slashes. Entries are
+    /// returned in the order they were staged.
+    pub fn get_pending_slashes(env: Env, oracle_address: Address) -> Vec<PendingSlash> {
+        extend_instance_ttl(&env);
+        let pending_matches: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingSlashList(oracle_address.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut pending_slashes = Vec::new(&env);
+        for match_id in pending_matches.iter() {
+            if let Some(pending) = env
+                .storage()
+                .instance()
+                .get(&DataKey::PendingSlash(oracle_address.clone(), match_id))
+            {
+                pending_slashes.push_back(pending);
+            }
+        }
+        pending_slashes
+    }
+
+    fn remove_pending_slash_match(env: &Env, oracle_address: &Address, match_id: u64) {
+        let list_key = DataKey::PendingSlashList(oracle_address.clone());
+        let pending_matches: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&list_key)
+            .unwrap_or(Vec::new(env));
+        let mut remaining = Vec::new(env);
+        for pending_match_id in pending_matches.iter() {
+            if pending_match_id != match_id {
+                remaining.push_back(pending_match_id);
+            }
+        }
+        if remaining.is_empty() {
+            env.storage().instance().remove(&list_key);
+        } else {
+            env.storage().instance().set(&list_key, &remaining);
+        }
     }
 
     /// Admin submits a verified match result on-chain.

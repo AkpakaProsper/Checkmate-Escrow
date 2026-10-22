@@ -28,7 +28,7 @@ fn test_get_dispute_details_returns_dispute_for_match() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2,
-        &String::from_str(&env, "evidence_hash_here"),
+        &String::from_str(&env, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
     );
 
     // get_dispute_details should return the same dispute as get_dispute

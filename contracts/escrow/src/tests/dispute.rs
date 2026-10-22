@@ -1,6 +1,13 @@
 use super::*;
 use soroban_sdk::testutils::Ledger as _;
 
+const TEST_EVIDENCE_HASH: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn valid_evidence_hash(env: &Env) -> String {
+    String::from_str(env, TEST_EVIDENCE_HASH)
+}
+
 fn create_funded_active_match(
     client: &EscrowContractClient,
     env: &Env,
@@ -199,7 +206,7 @@ fn test_finalize_match_fails_when_dispute_raised() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     // Raise dispute
-    client.dispute_oracle_result(&match_id, &player1, &String::from_str(&env, "b3dfd696"));
+    client.dispute_oracle_result(&match_id, &player1, &valid_evidence_hash(&env));
 
     // finalize_match should now fail
     env.ledger().set_sequence_number(1200);
@@ -222,12 +229,12 @@ fn test_dispute_oracle_result_creates_dispute() {
     client.submit_result(&match_id, &Winner::Player2, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player1, &String::from_str(&env, "352aaeb7"));
+        client.dispute_oracle_result(&match_id, &player1, &valid_evidence_hash(&env));
 
     let dispute = client.get_dispute(&dispute_id);
     assert_eq!(dispute.match_id, match_id);
     assert_eq!(dispute.disputer, player1);
-    assert_eq!(dispute.evidence_hash, String::from_str(&env, "352aaeb7"));
+    assert_eq!(dispute.evidence_hash, valid_evidence_hash(&env));
     assert_eq!(dispute.state, DisputeState::Active);
     assert_eq!(dispute.yes_votes, 0);
     assert_eq!(dispute.no_votes, 0);
@@ -248,7 +255,7 @@ fn test_dispute_oracle_result_rejects_non_player() {
 
     let stranger = Address::generate(&env);
     let result =
-        client.try_dispute_oracle_result(&match_id, &stranger, &String::from_str(&env, "99d6288b"));
+        client.try_dispute_oracle_result(&match_id, &stranger, &valid_evidence_hash(&env));
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
@@ -268,7 +275,7 @@ fn test_dispute_oracle_result_rejects_after_deadline() {
     env.ledger().set_sequence_number(1100);
 
     let result =
-        client.try_dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "99d6288b"));
+        client.try_dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
     assert_eq!(result, Err(Ok(Error::DisputePeriodNotElapsed)));
 }
 
@@ -284,10 +291,10 @@ fn test_dispute_oracle_result_rejects_duplicate() {
     env.ledger().set_sequence_number(1000);
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
-    client.dispute_oracle_result(&match_id, &player1, &String::from_str(&env, "c38d14bc"));
+    client.dispute_oracle_result(&match_id, &player1, &valid_evidence_hash(&env));
 
     let result =
-        client.try_dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "0xsecond"));
+        client.try_dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
     assert_eq!(result, Err(Ok(Error::DisputeAlreadyRaised)));
 }
 
@@ -307,6 +314,31 @@ fn test_dispute_oracle_result_rejects_empty_evidence() {
     assert_eq!(result, Err(Ok(Error::InvalidEvidenceHash)));
 }
 
+#[test]
+fn test_dispute_oracle_result_rejects_zero_and_malformed_evidence_hashes() {
+    let (env, contract_id, oracle, player1, player2, token, _admin) =
+        setup_with_dispute_period(200);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let match_id =
+        create_funded_active_match(&client, &env, &player1, &player2, &token, "zeroev01");
+    env.ledger().set_sequence_number(1000);
+    client.submit_result(&match_id, &Winner::Player1, &oracle);
+
+    let zero_hash = String::from_str(
+        &env,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    assert_eq!(
+        client.try_dispute_oracle_result(&match_id, &player2, &zero_hash),
+        Err(Ok(Error::InvalidEvidenceHash))
+    );
+    assert_eq!(
+        client.try_dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "abcd")),
+        Err(Ok(Error::InvalidEvidenceHash))
+    );
+}
+
 // ── vote_on_dispute ───────────────────────────────────────────────────────
 
 #[test]
@@ -324,7 +356,7 @@ fn test_vote_on_dispute_uptake_by_stakers() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2, // player2 disputes
-        &String::from_str(&env, "6c79d6c7"),
+        &valid_evidence_hash(&env),
     );
 
     // player2 votes to overturn (true)
@@ -357,7 +389,7 @@ fn test_vote_on_dispute_rejects_non_staker() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "394661e8"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let non_staker = Address::generate(&env);
     let result = client.try_vote_on_dispute(&dispute_id, &non_staker, &true);
@@ -377,7 +409,7 @@ fn test_vote_on_dispute_rejects_double_vote() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "394661e8"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     client.vote_on_dispute(&dispute_id, &player2, &true);
 
@@ -398,7 +430,7 @@ fn test_vote_on_dispute_rejects_after_voting_deadline() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "394661e8"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Advance past voting deadline
     env.ledger()
@@ -425,7 +457,7 @@ fn test_resolve_dispute_upholds_oracle_result() {
 
     // player2 disputes, but everyone votes to uphold
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "394661e8"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // player1 votes to uphold (no = false)
     client.vote_on_dispute(&dispute_id, &player1, &false);
@@ -463,7 +495,7 @@ fn test_resolve_dispute_overturns_oracle_result() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "394661e8"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // player2 votes to overturn (yes)
     client.vote_on_dispute(&dispute_id, &player2, &true);
@@ -497,7 +529,7 @@ fn test_resolve_dispute_fails_before_voting_deadline() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "394661e8"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Try to resolve before voting deadline
     let result = client.try_resolve_dispute_by_vote(&dispute_id);
@@ -523,7 +555,7 @@ fn test_resolve_dispute_quorum_met_before_deadline_still_blocked() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "394661e8"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // A single 100-token vote meets quorum exactly, but the window is open.
     client.vote_on_dispute(&dispute_id, &player1, &true);
@@ -620,7 +652,7 @@ fn test_dispute_created_event_emitted() {
     env.ledger().set_sequence_number(1000);
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
-    client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "8f9a074c"));
+    client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let events = env.events().all();
     let expected_topics = vec![
@@ -647,7 +679,7 @@ fn test_dispute_voted_event_emitted() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "8f9a074c"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     client.vote_on_dispute(&dispute_id, &player2, &true);
 
@@ -676,7 +708,7 @@ fn test_dispute_resolved_event_emitted() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "8f9a074c"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     client.vote_on_dispute(&dispute_id, &player2, &true);
 
@@ -750,7 +782,7 @@ fn test_get_match_dispute_id_returns_id() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "8f9a074c"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let stored = client.get_match_dispute_id(&match_id);
     assert_eq!(stored, dispute_id);
@@ -769,7 +801,7 @@ fn test_get_dispute_by_match_returns_dispute() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "8f9a074c"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let by_match = client.get_dispute_by_match(&match_id);
     assert!(by_match.is_some(), "dispute should be found by match_id");
@@ -802,7 +834,7 @@ fn test_full_dispute_lifecycle_overturned() {
         &player2,
         &100,
         &token,
-        &String::from_str(&env, "5a24e0f7"),
+        &valid_evidence_hash(&env),
         &Platform::Lichess,
     );
     client.deposit(&match_id, &player1);
@@ -822,7 +854,7 @@ fn test_full_dispute_lifecycle_overturned() {
 
     // Player2 disputes
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "ff28caaf"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let dispute = client.get_dispute(&dispute_id);
     assert_eq!(dispute.state, DisputeState::Active);
@@ -875,7 +907,7 @@ fn test_dispute_requires_bond() {
     // Bond required: 100 tokens * 100 bps / 10_000 = 1 token
     let initial_p2_balance = token_client.balance(&player2);
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Bond should be transferred from player2 to escrow
     let after_bond_balance = token_client.balance(&player2);
@@ -908,7 +940,7 @@ fn test_dispute_bond_minimum_one_for_tiny_stake() {
 
     let initial_p2_balance = token_client.balance(&player2);
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let dispute = client.get_dispute(&dispute_id);
     assert_eq!(dispute.dispute_bond, 1, "bond must be floored to 1 stroop");
@@ -938,7 +970,7 @@ fn test_dispute_bond_minimum_one_for_sub_unit_stake() {
 
     let initial_p2_balance = token_client.balance(&player2);
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let dispute = client.get_dispute(&dispute_id);
     assert_eq!(dispute.dispute_bond, 1);
@@ -963,7 +995,7 @@ fn test_dispute_bond_refunded_on_overturn() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let player2_before_vote = token_client.balance(&player2);
 
@@ -998,7 +1030,7 @@ fn test_dispute_bond_forfeited_on_upheld() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let player2_before = token_client.balance(&player2);
     let treasury_before = token_client.balance(&admin);
@@ -1033,7 +1065,7 @@ fn test_vote_uses_snapshot_weight() {
 
     // Dispute created, snapshot taken at this ledger
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let dispute = client.get_dispute(&dispute_id);
     assert_eq!(dispute.snapshot_ledger, 1000);
@@ -1069,7 +1101,7 @@ fn test_quorum_not_met_prevents_resolution() {
     // Quorum threshold = 200 * 50% = 100 tokens minimum participation
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Only one player votes (100 tokens), which is exactly the quorum
     client.vote_on_dispute(&dispute_id, &player1, &true);
@@ -1099,7 +1131,7 @@ fn test_quorum_not_met_with_low_participation() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Only one player votes (less than 100%)
     client.vote_on_dispute(&dispute_id, &player1, &true);
@@ -1165,7 +1197,7 @@ fn overturned_dispute(
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "ab12cd34"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
     client.vote_on_dispute(&dispute_id, &player2, &true);
 
     env.ledger()
@@ -1230,7 +1262,7 @@ fn test_mark_dispute_for_oracle_slash_requires_resolved_overturned_state() {
     env.ledger().set_sequence_number(1000);
     client.submit_result(&match_id, &Winner::Player1, &oracle);
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "cd34ab12"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     let result = client.try_mark_dispute_for_oracle_slash(&dispute_id, &1);
     assert_eq!(result, Err(Ok(Error::InvalidState)));
@@ -1326,7 +1358,7 @@ fn test_vote_weight_exceeding_u32_max_recorded_correctly() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &normal_player2,
-        &String::from_str(&env, "evidence"),
+        &valid_evidence_hash(&env),
     );
 
     // Record the voter's vote with large escrowed stake
@@ -1400,7 +1432,7 @@ fn test_two_voters_with_2_to_32_balance_difference_distinguished() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &normal_player2,
-        &String::from_str(&env, "evidence"),
+        &valid_evidence_hash(&env),
     );
 
     client.vote_on_dispute(&dispute_id, &voter1, &true);
@@ -1474,7 +1506,7 @@ fn test_quorum_calculation_with_large_total_votes() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &normal_player2,
-        &String::from_str(&env, "evidence"),
+        &valid_evidence_hash(&env),
     );
 
     // Both large voters vote yes
@@ -1503,7 +1535,7 @@ fn test_small_balances_unchanged_behavior() {
     client.submit_result(&match_id, &Winner::Player1, &oracle);
 
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Both players have a 100 stake each (well under u32::MAX)
     client.vote_on_dispute(&dispute_id, &player1, &true);
@@ -1557,7 +1589,7 @@ fn test_dispute_bond_tier_schedule_varies_by_stake() {
         create_funded_active_match_with_stake(&client, &env, &player1, &player2, &token, "bndt1", 50);
     env.ledger().set_sequence_number(1000);
     client.submit_result(&m1, &Winner::Player1, &oracle);
-    let d1 = client.dispute_oracle_result(&m1, &player2, &String::from_str(&env, "evidence"));
+    let d1 = client.dispute_oracle_result(&m1, &player2, &valid_evidence_hash(&env));
     assert_eq!(client.get_dispute(&d1).dispute_bond, 2);
 
     // stake 100 → catch-all second tier (100 bps) → 100 * 100 / 10_000 = 1
@@ -1565,7 +1597,7 @@ fn test_dispute_bond_tier_schedule_varies_by_stake() {
         create_funded_active_match_with_stake(&client, &env, &player1, &player2, &token, "bndt2", 100);
     env.ledger().set_sequence_number(1100);
     client.submit_result(&m2, &Winner::Player1, &oracle);
-    let d2 = client.dispute_oracle_result(&m2, &player2, &String::from_str(&env, "evidence"));
+    let d2 = client.dispute_oracle_result(&m2, &player2, &valid_evidence_hash(&env));
     assert_eq!(client.get_dispute(&d2).dispute_bond, 1);
 }
 
@@ -1583,7 +1615,7 @@ fn test_dispute_bond_tier_schedule_falls_back_to_global_when_empty() {
     env.ledger().set_sequence_number(1000);
     client.submit_result(&match_id, &Winner::Player1, &oracle);
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "evidence"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Global 100 bps → 100 * 100 / 10_000 = 1
     assert_eq!(client.get_dispute(&dispute_id).dispute_bond, 1);
@@ -1611,7 +1643,7 @@ fn test_resolve_dispute_zero_votes_returns_quorum_not_met() {
 
     // Player2 raises a dispute. No one casts a single vote.
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "abc12345"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     // Confirm dispute is active and both vote tallies are zero.
     let dispute = client.get_dispute(&dispute_id);
@@ -1670,7 +1702,7 @@ fn test_resolve_dispute_zero_votes_with_explicit_quorum_threshold() {
 
     // Dispute raised; no votes cast.
     let dispute_id =
-        client.dispute_oracle_result(&match_id, &player2, &String::from_str(&env, "def67890"));
+        client.dispute_oracle_result(&match_id, &player2, &valid_evidence_hash(&env));
 
     env.ledger()
         .set_sequence_number(1000 + VOTING_PERIOD_LEDGERS);

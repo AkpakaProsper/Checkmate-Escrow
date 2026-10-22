@@ -170,10 +170,23 @@ curl -X POST http://localhost:9090/-/reload
 
 ### Import via UI
 
-1. Open Grafana → **Dashboards** → **Import**.
-2. Upload `monitoring/grafana/dashboards/contract-health.json`.
-3. Select your Prometheus datasource when prompted.
-4. Click **Import**.
+1. Sign in to Grafana and open **Dashboards** → **New** → **Import**.
+2. Under **Import dashboard**, use **Upload dashboard JSON file** and select
+   [`monitoring/grafana/dashboards/contract-health.json`](../monitoring/grafana/dashboards/contract-health.json).
+   Alternatively, paste the JSON contents into the text box.
+3. On the import options screen, choose the **Prometheus** datasource for the
+   `DS_PROMETHEUS` input. The dashboard uses this input for its panels and
+   annotations.
+4. Choose the **Checkmate** folder (or another folder) if prompted, then click
+   **Import**.
+5. Open **Dashboards** and select **Checkmate-Escrow — Contract Health** to
+   confirm the panels load. If they show no data, verify that Prometheus is
+   scraping the services and that the datasource selected above can query it.
+
+The JSON file is already included in the repository; no dashboard download or
+dashboard ID lookup is needed. For repeatable deployments, use the
+auto-provisioning steps below instead of importing the same dashboard in the
+UI.
 
 ### Auto-provision (recommended for production)
 
