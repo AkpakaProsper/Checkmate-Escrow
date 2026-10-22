@@ -445,3 +445,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <!-- handsoff-issue-1562 -->
 - #1562: Performance: `get_bracket_matches` scans every match ever created
+
+<!-- handsoff-issue-1773 -->
+- #1773: Fix: websocket server does not validate subscription `match_id` is a valid u64
