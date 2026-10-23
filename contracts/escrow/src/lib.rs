@@ -3823,6 +3823,9 @@ impl EscrowContract {
     /// are set, regardless of match state. Specifically, it remains `true` after payout
     /// (when state transitions to `Completed`) because the deposit flags are never cleared.
     ///
+    /// # Warning
+    /// Do not use this function to determine if a match is in progress — check `match.state` instead.
+    ///
     /// This indicates historical deposit status, not current escrowed funds.
     /// To check if funds are currently held in escrow, use [`is_currently_escrowed`].
     pub fn is_funded(env: Env, match_id: u64) -> Result<bool, Error> {

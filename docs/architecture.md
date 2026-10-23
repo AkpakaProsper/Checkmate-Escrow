@@ -444,7 +444,7 @@ This section lists the complete public function surface of `EscrowContract` (`co
 |----------|-----------|-------------|
 | `deposit` | `(match_id: u64, player: Address)` | Deposits the caller's stake into escrow. |
 | `get_escrow_balance` | `(match_id: u64) -> i128` | Returns the total escrowed balance for a match. |
-| `is_funded` | `(match_id: u64) -> bool` | Returns `true` when both players have deposited. |
+| `is_funded` | `(match_id: u64) -> bool` | Returns `true` when both players have deposited. Note: callers must check `match.state` to determine if a match is in progress, as `is_funded` remains `true` post-payout. |
 | `get_depositor_count` | `(match_id: u64) -> u32` | Returns how many of the two players (0, 1, or 2) have deposited. |
 | `claim_vested_payout` | `(match_id: u64, player: Address)` | For matches settled under a non-zero effective vesting duration (the match's `vesting_override_seconds` if set, otherwise `ProtocolConfig::vesting_duration_seconds`): releases `player`'s share once the vesting period (tracked via `vested_at`) has elapsed. Returns `Error::Overflow` on timestamp arithmetic overflow. |
 | `deposit_batch` | `(entries: Vec<(u64, Address)>) -> Result<Vec<Option<Error>>, Error>` | Batch version of `deposit`. Accepts a list of `(match_id, player)` pairs and processes each independently. Returns `Error::ContractPaused` immediately if the contract is paused; otherwise returns a `Vec` of outcomes (`None` = success, `Some(Error)` = that entry's failure) in input order. |

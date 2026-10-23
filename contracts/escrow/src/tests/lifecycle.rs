@@ -2063,6 +2063,8 @@ fn test_is_funded_returns_true_after_payout() {
         client.is_funded(&id),
         "is_funded returns true after payout because it checks deposit flags, not match state"
     );
+    // Callers must check match.state rather than is_funded to determine if in progress:
+    assert_ne!(client.get_match(&id).state, MatchState::Active);
 
     assert_eq!(
         client.get_escrow_balance(&id),

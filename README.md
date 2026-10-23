@@ -290,7 +290,9 @@ get_escrow_balance(match_id) -> Result<i128, Error>
 
 These two functions answer different questions and are easy to confuse:
 
-- **`is_funded(match_id)`** — returns `true` only when *both* players have deposited their stake (i.e. the match has transitioned to `Active`). It reflects deposit flags, not token balances. Use this to gate game-start logic.
+- **`is_funded(match_id)`** — returns `true` only when *both* players have deposited their stake (i.e. the match has transitioned to `Active`). It reflects deposit flags, not token balances.
+
+> **Warning:** Do not use this function to determine if a match is in progress — check `match.state` instead.
 
 - **`get_escrow_balance(match_id)`** — returns the total token amount currently held in escrow for the match: `0`, `1×stake`, or `2×stake` depending on how many players have deposited. Once a match is `Completed` or `Cancelled` (funds already paid out or refunded), this always returns `0` regardless of on-chain token balances.
 
