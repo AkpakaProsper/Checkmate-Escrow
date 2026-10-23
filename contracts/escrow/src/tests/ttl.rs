@@ -257,7 +257,14 @@ fn test_instance_ttl_extended_on_dispute_oracle_result() {
     client.submit_result(&id, &Winner::Player1, &oracle, &None);
 
     assert_instance_ttl_extended(&env, &contract_id, &token, "dispute_oracle_result", || {
-        client.dispute_oracle_result(&id, &player2, &String::from_str(&env, "ev1d3nc3"));
+        client.dispute_oracle_result(
+            &id,
+            &player2,
+            &String::from_str(
+                &env,
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+        );
     });
 }
 
@@ -279,8 +286,14 @@ fn test_instance_ttl_extended_on_vote_on_dispute() {
     client.deposit(&id, &player2);
     env.ledger().set_sequence_number(1_000);
     client.submit_result(&id, &Winner::Player1, &oracle, &None);
-    let dispute_id =
-        client.dispute_oracle_result(&id, &player2, &String::from_str(&env, "ev1d3nc3"));
+    let dispute_id = client.dispute_oracle_result(
+        &id,
+        &player2,
+        &String::from_str(
+            &env,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+    );
 
     // Age the instance entry first, then widen the voting window so the vote is
     // still castable at the aged ledger.
@@ -310,8 +323,14 @@ fn test_instance_ttl_extended_on_resolve_dispute_by_vote() {
     client.deposit(&id, &player2);
     env.ledger().set_sequence_number(1_000);
     client.submit_result(&id, &Winner::Player1, &oracle, &None);
-    let dispute_id =
-        client.dispute_oracle_result(&id, &player2, &String::from_str(&env, "ev1d3nc3"));
+    let dispute_id = client.dispute_oracle_result(
+        &id,
+        &player2,
+        &String::from_str(
+            &env,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+    );
     client.vote_on_dispute(&dispute_id, &player1, &false);
     client.vote_on_dispute(&dispute_id, &player2, &true);
 

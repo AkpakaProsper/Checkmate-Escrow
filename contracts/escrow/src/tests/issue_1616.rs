@@ -221,7 +221,10 @@ fn test_resolve_dispute_by_vote_no_double_payout_upheld() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2,
-        &String::from_str(&env, "evidence01"),
+        &String::from_str(
+            &env,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
     );
 
     // player1 votes to uphold (no = false); player2 votes to overturn (yes = true).
@@ -290,7 +293,10 @@ fn test_resolve_dispute_by_vote_no_double_payout_overturned() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2,
-        &String::from_str(&env, "evidence02"),
+        &String::from_str(
+            &env,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
     );
 
     // player2 votes to overturn (yes = true) — majority overturn.

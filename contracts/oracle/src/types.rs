@@ -172,6 +172,9 @@ pub enum DataKey {
     /// `deactivate_slow_oracle`. Set by `set_sla_threshold` (admin-only).
     /// Falls back to the hardcoded default when unset.
     SlaThreshold,
+    /// Match IDs with staged slashes for an oracle, used to enumerate
+    /// pending slash records without scanning contract storage.
+    PendingSlashList(Address),
 }
 
 /// A slash that has been staged but not yet finalized, pending

@@ -186,6 +186,31 @@ fn test_slash_oracle_stages_pending_slash_without_immediate_transfer() {
 }
 
 #[test]
+fn test_get_pending_slashes_lists_and_removes_staged_slashes() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+    client.slash_oracle(&oracle_admin, &1u64, &50i128);
+    client.slash_oracle(&oracle_admin, &2u64, &75i128);
+
+    let pending = client.get_pending_slashes(&oracle_admin);
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.get(0).unwrap().match_id, 1);
+    assert_eq!(pending.get(1).unwrap().match_id, 2);
+
+    client.finalize_slash(&oracle_admin, &1u64);
+    let pending = client.get_pending_slashes(&oracle_admin);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.get(0).unwrap().match_id, 2);
+
+    client.admin_cancel_slash(&oracle_admin, &2u64);
+    assert!(client.get_pending_slashes(&oracle_admin).is_empty());
+}
+
+#[test]
 fn test_admin_cancel_slash_prevents_finalization() {
     // Governance intervention: a slash staged due to a bug or data
     // corruption can be cancelled before it takes effect.

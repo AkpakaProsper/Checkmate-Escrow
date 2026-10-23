@@ -196,6 +196,16 @@ fn extend_instance_ttl(env: &Env) {
         .extend_ttl(MATCH_TTL_LEDGERS / 2, MATCH_TTL_LEDGERS);
 }
 
+/// Validate a non-zero 32-byte evidence hash encoded as 64 hexadecimal chars.
+fn is_valid_evidence_hash(evidence_hash: &String) -> bool {
+    if evidence_hash.len() != 64 {
+        return false;
+    }
+    let mut bytes = [0u8; 64];
+    evidence_hash.copy_into_slice(&mut bytes);
+    bytes.iter().all(u8::is_ascii_hexdigit) && bytes.iter().any(|byte| *byte != b'0')
+}
+
 #[contract]
 pub struct EscrowContract;
 
@@ -4147,8 +4157,8 @@ impl EscrowContract {
     /// Raise a dispute against an oracle-submitted result.
     ///
     /// Any player (either player1 or player2 of the match) may call this
-    /// before the dispute deadline elapses. An `evidence_hash` must be
-    /// provided as a reference to off-chain evidence.
+    /// before the dispute deadline elapses. An `evidence_hash` must be a
+    /// non-zero 32-byte hash encoded as 64 hexadecimal characters.
     ///
     /// Requires a bonded stake (configurable basis points of match stake);
     /// refunded on successful overturn, forfeited on upheld outcome.
@@ -4188,7 +4198,7 @@ impl EscrowContract {
             return Err(Error::DisputePeriodNotElapsed);
         }
 
-        if evidence_hash.is_empty() {
+        if !is_valid_evidence_hash(&evidence_hash) {
             return Err(Error::InvalidEvidenceHash);
         }
 
