@@ -5770,6 +5770,46 @@ impl EscrowContract {
         Ok(())
     }
 
+    /// Restore the original oracle after a temporary rotation window has expired.
+    ///
+    /// Callable by *anyone* once the temporary-rotation window has closed.
+    /// There is no admin requirement because this function only restores the
+    /// previously-configured oracle — it cannot install an arbitrary address.
+    ///
+    /// # Errors
+    /// - `InvalidState` — no temporary rotation is currently recorded, or the
+    ///   rotation window has **not yet** elapsed.
+    pub fn finalize_temp_oracle_rotation(env: Env) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+
+        let mut rotation_state = Self::get_rotation_state(&env);
+        let temp = rotation_state.temp().ok_or(Error::InvalidState)?;
+
+        let now = env.ledger().timestamp();
+        if now < temp.expiry {
+            return Err(Error::InvalidState);
+        }
+
+        // The base oracle in storage was never changed by `rotate_oracle_temporary`,
+        // so it still holds the original oracle address.  We only need to clear
+        // the stale temp record and emit the event.
+        let restored_oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Oracle)
+            .ok_or(Error::Unauthorized)?;
+
+        rotation_state.set_temp(None);
+        Self::save_rotation_state(&env, rotation_state);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("rot_rest")),
+            (temp.temp_oracle, restored_oracle),
+        );
+
+        Ok(())
+    }
+
     /// Admin proposes a permanent oracle rotation from `old_oracle` to `new_oracle`.
     pub fn propose_oracle_rotation(
         env: Env,
