@@ -1,3 +1,4 @@
+
 extern crate std;
 
 use super::*;
@@ -9,6 +10,7 @@ use soroban_sdk::{
     token::StellarAssetClient,
     Address, Env, IntoVal, String, Symbol,
 };
+
 
 fn setup() -> (Env, Address, Address, Address, Address, Address, Address) {
     let env = Env::default();
@@ -86,6 +88,50 @@ fn test_register_oracle_with_stake_transfers_tokens_and_allows_submission() {
         &Winner::Player1,
         &1000u64,
     );
+}
+
+#[test]
+fn test_register_oracle_with_stake_rejects_zero_stake() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+    let balance_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &200);
+
+    let result = client.try_register_oracle_with_stake(&oracle_admin, &0i128, &token_addr);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+    // No tokens must have moved and no registration must have been stored.
+    assert_eq!(balance_client.balance(&contract_id), 0);
+    let registration: Option<OracleRegistration> = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleRegistration(oracle_admin.clone()))
+    });
+    assert!(registration.is_none());
+}
+
+#[test]
+fn test_register_oracle_with_stake_rejects_negative_stake() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+    let balance_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &200);
+
+    let result = client.try_register_oracle_with_stake(&oracle_admin, &(-1i128), &token_addr);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+    // No tokens must have moved and no registration must have been stored.
+    assert_eq!(balance_client.balance(&contract_id), 0);
+    let registration: Option<OracleRegistration> = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleRegistration(oracle_admin.clone()))
+    });
+    assert!(registration.is_none());
 }
 
 #[test]
