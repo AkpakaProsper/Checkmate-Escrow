@@ -6981,6 +6981,26 @@ impl EscrowContract {
             .unwrap_or_else(|| Self::get_config(env).vesting_duration_seconds)
     }
 
+    /// Returns `true` when `m` has been in `Paused` state for longer than
+    /// [`MAX_PAUSE_DURATION_LEDGERS`], based on the ledger sequence recorded
+    /// in `m.paused_ledger` when the pause began.
+    ///
+    /// Returns `false` when the match is not paused or when `paused_ledger`
+    /// is unset (defensive: a paused match with no recorded timestamp cannot
+    /// be proven to have exceeded the cap, so we do not penalise it).
+    fn pause_duration_exceeded(env: &Env, m: &Match) -> bool {
+        if m.state != MatchState::Paused {
+            return false;
+        }
+        match m.paused_ledger {
+            Some(started) => {
+                let elapsed = env.ledger().sequence().saturating_sub(started);
+                elapsed > MAX_PAUSE_DURATION_LEDGERS
+            }
+            None => false,
+        }
+    }
+
     /// Compute the referral fee to deduct from a winner's payout.
     ///
     /// Returns 0 if the match has no referrer or if the cancellation_fee_basis_points

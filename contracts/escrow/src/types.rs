@@ -176,6 +176,9 @@ pub struct Match {
     pub conversion_rate_ledger: Option<u32>,
     /// Ledger when pause started (if any).
     pub paused_ledger: Option<u32>,
+    /// Ledger sequence at which the match was paused. Used to enforce
+    /// `MAX_PAUSE_DURATION` in `resume_match` and `admin_resolve_stalled_match`.
+    pub paused_at_ledger: Option<u32>,
     /// Total pause duration in ledgers.
     pub total_pause_duration: u32,
     /// Optional referrer address for referral fee sharing.
