@@ -95,4 +95,10 @@ pub enum Error {
     /// `confirm_upgrade` after `schedule_upgrade`. This error is returned when
     /// no confirmation has been recorded for the pending upgrade hash.
     UpgradeNotConfirmed = 58,
+    /// `admin_recover_match` was called before the match-timeout time-lock has
+    /// elapsed.  The match must have been in `Pending` state for at least
+    /// `current_match_timeout()` ledgers (the same window `expire_match` uses)
+    /// before an admin can unilaterally recover funds.  This prevents a
+    /// compromised admin key from immediately draining any active escrow.
+    RecoveryTimelockNotElapsed = 59,
 }
