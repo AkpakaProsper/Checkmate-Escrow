@@ -315,6 +315,25 @@ fn test_rollback_rejects_completed_match() {
 }
 
 #[test]
+fn test_rollback_rejects_pending_result_match() {
+    let (env, contract_id, oracle, player1, player2, token, _admin) =
+        setup_with_dispute_period(100);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = create_active_match(&client, &env, &player1, &player2, &token, "b1817pend");
+    client.submit_result(&id, &Winner::Player1, &oracle);
+    assert_eq!(client.get_match(&id).state, MatchState::PendingResult);
+
+    let result =
+        client.try_dispute_and_rollback_match(&id, &player1, &String::from_str(&env, "rollback"));
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidState)),
+        "matches in PendingResult state must use oracle dispute path, not rollback"
+    );
+}
+
+#[test]
 fn test_rollback_rejects_paused_match() {
     let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
