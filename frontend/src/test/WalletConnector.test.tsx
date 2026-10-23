@@ -57,13 +57,20 @@ describe('WalletConnector', () => {
     expect(screen.getByText('Disconnect')).toBeInTheDocument();
   });
 
-  it('calls disconnect', () => {
+  it('copies address and shows confirmation', async () => {
     const key = 'GABCDE1234567890ABCDE1234567890ABCDE1234567890ABCDE1234567';
     const wallet = makeWallet({ connected: true, publicKey: key, type: 'freighter' });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
     render(<WalletConnector wallet={wallet} />);
-    fireEvent.click(screen.getByText('Disconnect'));
-    expect(wallet.disconnect).toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText('Copy address'));
+    expect(writeText).toHaveBeenCalledWith(key);
+    expect(screen.getByText('Copied!')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Copy address')).toBeInTheDocument();
+    }, { timeout: 2000 });
   });
+});
 
   it('shows error message', () => {
     const wallet = makeWallet({ error: 'Freighter extension not detected.' });

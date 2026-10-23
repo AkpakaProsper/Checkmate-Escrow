@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { WalletState, WalletType } from '../../wallets/types';
 
 interface Props {
@@ -9,6 +10,18 @@ interface Props {
 
 export function WalletConnector({ wallet }: Props) {
   const { connected, publicKey, error, connect, disconnect } = wallet;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    if (!publicKey) return;
+    try {
+      await navigator.clipboard.writeText(publicKey);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      // Ignore clipboard errors
+    }
+  };
 
   if (connected && publicKey) {
     return (
@@ -16,6 +29,9 @@ export function WalletConnector({ wallet }: Props) {
         <span title={publicKey}>
           {publicKey.slice(0, 6)}…{publicKey.slice(-4)}
         </span>
+        <button type="button" onClick={handleCopy} aria-label="Copy address">
+          {copied ? 'Copied!' : 'Copy address'}
+        </button>
         <button type="button" onClick={disconnect}>
           Disconnect
         </button>
