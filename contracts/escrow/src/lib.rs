@@ -2710,6 +2710,12 @@ impl EscrowContract {
     /// refunds with TokenNotAllowed error, leaving any deposited funds locked forever.
     /// This function allows admin to force refunds even if the token is blacklisted.
     ///
+    /// **Time-lock (Issue #1812):** The match must have been `Pending` for at least
+    /// `current_match_timeout()` ledgers before the admin can recover it — the same
+    /// window that `expire_match` uses.  This prevents a compromised admin key from
+    /// immediately draining escrow funds: an attacker cannot call this function until
+    /// the match has already timed out and would be eligible for normal expiry.
+    ///
     /// Issue #1546: Fix: expire_match blocks refunds forever if the match token was blacklisted
     pub fn admin_recover_match(env: Env, match_id: u64) -> Result<(), Error> {
         extend_instance_ttl(&env);
@@ -2729,6 +2735,20 @@ impl EscrowContract {
         // Only allow recovery of Pending matches (the ones that can't deposit/complete)
         if m.state != MatchState::Pending {
             return Err(Error::InvalidState);
+        }
+
+        // Time-lock: the match must have been Pending for at least the match-timeout
+        // window before the admin can recover it.  This is the same elapsed-ledger
+        // threshold used by expire_match, so admin recovery is only possible once the
+        // match would already be eligible for normal expiry.  A compromised admin key
+        // therefore cannot drain a freshly-created or recently-deposited escrow.
+        let elapsed = env
+            .ledger()
+            .sequence()
+            .saturating_sub(m.created_ledger);
+        let timeout = Self::current_match_timeout(&env);
+        if elapsed < timeout {
+            return Err(Error::RecoveryTimelockNotElapsed);
         }
 
         // TODO: Implement forced refund with try_invoke_contract to handle blacklisted tokens

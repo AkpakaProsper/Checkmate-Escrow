@@ -460,6 +460,62 @@ stellar contract invoke --id $ESCROW_ID -- is_paused
 - [ ] Penetration testing of oracle infrastructure
 - [ ] Code review of contract upgrades
 
+## `admin_recover_match` Time-Lock (Issue #1812)
+
+`admin_recover_match` is an admin escape hatch for `Pending` matches whose
+token was blacklisted after creation, making `expire_match` permanently fail
+with `TokenNotAllowed`.  Without a guard, a single compromised admin key could
+immediately drain any active escrow — no game needs to occur, no player
+consent is required.
+
+### The Risk
+
+| Scenario | Without time-lock | With time-lock |
+|----------|-------------------|----------------|
+| Admin key compromised | Attacker drains any funded escrow instantly | Attacker must wait until the match has already timed out (≥ 1 day at minimum timeout) |
+| Admin calls function on fresh match | Succeeds immediately | Rejected with `Error::RecoveryTimelockNotElapsed` (code 59) |
+| Admin calls after match timeout elapses | N/A | Succeeds — match is genuinely stuck |
+
+### The Fix
+
+`admin_recover_match` now enforces a **time-lock equal to the configured match
+timeout** before it will act.  Concretely:
+
+```rust
+let elapsed = env.ledger().sequence().saturating_sub(m.created_ledger);
+let timeout = Self::current_match_timeout(&env);
+if elapsed < timeout {
+    return Err(Error::RecoveryTimelockNotElapsed);
+}
+```
+
+This reuses the **same ledger-elapsed threshold** that `expire_match` checks
+(`elapsed >= current_match_timeout()`), so admin recovery is only possible
+once the match would already be eligible for normal expiry.  The time-lock
+cannot be shortened below `MIN_MATCH_TIMEOUT_SECONDS` (86,400 seconds / 1 day)
+because `set_match_timeout` enforces that bound.
+
+### Security Properties
+
+1. **No new trust assumptions**: the time-lock is enforced entirely in the
+   smart contract without any off-chain component.
+2. **No new admin privilege escalation**: the fix only *removes* the ability to
+   act early; it does not add any new capability.
+3. **Fund safety preserved**: a frozen or blacklisted-token match can still be
+   recovered by the admin once the timeout window has closed, so funds are
+   never permanently locked.
+4. **Error surfaced as code 59** (`RecoveryTimelockNotElapsed`) — distinct from
+   `MatchNotExpired` (code 14, used by `expire_match`) so callers and monitoring
+   can distinguish the two rejection reasons.
+
+### Threat Model Update
+
+| Attack | Before fix | After fix |
+|--------|-----------|-----------|
+| Compromised admin key drains fresh escrow | ✅ possible (instant) | ❌ blocked until match timeout elapses |
+| Legitimate admin recovers blacklisted-token match | ✅ | ✅ (after match timeout) |
+| Admin bypasses oracle for Active match | Not this function's scope | Not this function's scope (see `admin_resolve_stalled_match`) |
+
 ---
 
 ## Security Contacts
