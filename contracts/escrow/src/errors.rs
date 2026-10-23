@@ -71,6 +71,9 @@ pub enum Error {
     NotStablecoin = 46,
     UpgradeNotScheduled = 47,
     UpgradeReviewPeriodNotElapsed = 48,
+    /// The requested migration `target_version` is not greater than the currently
+    /// stored version. Returned by `migrate_state` to reject downgrades and
+    /// no-op migrations that could corrupt the storage layout.
     InvalidVersion = 49,
     UpgradeAlreadyScheduled = 50,
     /// Oracle has already submitted a confirmation for this match.

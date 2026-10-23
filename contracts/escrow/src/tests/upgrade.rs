@@ -376,6 +376,30 @@ fn test_migrate_state_lower_version_is_rejected() {
 }
 
 #[test]
+fn test_migrate_state_downgrade_is_rejected_and_version_unchanged() {
+    let (env, contract_id, _oracle, _p1, _p2, _token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // Advance the stored version to a higher value.
+    client.migrate_state(&1_001u32);
+    assert_eq!(client.get_version(), 1_001);
+
+    // Attempting a downgrade migration must be rejected by the version guard.
+    let result = client.try_migrate_state(&crate::CONTRACT_VERSION);
+    assert!(
+        matches!(result, Err(Ok(Error::InvalidVersion))),
+        "downgrade migration must return InvalidVersion"
+    );
+
+    // The rejected call must not have altered the stored version.
+    assert_eq!(
+        client.get_version(),
+        1_001,
+        "rejected downgrade migration must leave the version unchanged"
+    );
+}
+
+#[test]
 fn test_migrate_state_non_admin_is_rejected() {
     let (env, contract_id, _oracle, _p1, _p2, _token, _admin) = setup();
     // Strip all auths so the admin check fires.
